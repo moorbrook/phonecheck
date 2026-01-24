@@ -61,16 +61,7 @@ digest = "0.10"
 # High-quality audio resampling
 rubato = "0.16"
 
-# Packet capture (optional, requires libpcap)
-pcap = { version = "2.4", optional = true }
-
-[features]
-default = []
-record = ["pcap"]
-
 [dev-dependencies]
-# For reading pcap files in tests (no libpcap required)
-pcap-file = "2"
 # Property-based testing
 proptest = "1"
 

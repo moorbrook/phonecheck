@@ -133,16 +133,6 @@ cp .env.example .env
 ./target/release/phonecheck --validate
 ```
 
-### Record RTP Packets (Debugging)
-
-```bash
-# Build with recording feature
-cargo build --release --features record
-
-# Record packets to pcap file
-./target/release/phonecheck --record-pcap call.pcap
-```
-
 ### Command Line Options
 
 ```
@@ -151,7 +141,6 @@ USAGE: phonecheck [OPTIONS]
 OPTIONS:
     --once              Run a single check and exit
     --validate          Validate configuration and exit
-    --record-pcap FILE  Record RTP packets to pcap file (implies --once)
     --help, -h          Show help message
 
 ENVIRONMENT:

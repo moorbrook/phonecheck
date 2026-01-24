@@ -21,28 +21,9 @@ use scheduler::run_scheduler;
 use sip::SipClient;
 use speech::SpeechRecognizer;
 
-/// Find an available port in the RTP range (16384-32767) and return bound socket
-/// Returns both the socket and port to avoid race conditions between finding and rebinding
-async fn find_available_rtp_socket() -> Result<(tokio::net::UdpSocket, u16)> {
-    use tokio::net::UdpSocket;
-
-    // Try ports in the standard RTP range
-    for port in (16384..32768).step_by(2) {
-        if let Ok(socket) = UdpSocket::bind(format!("0.0.0.0:{}", port)).await {
-            return Ok((socket, port));
-        }
-    }
-
-    // Fallback: let OS assign
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    let port = socket.local_addr()?.port();
-    Ok((socket, port))
-}
-
 /// Parse command line arguments
 struct Args {
     once: bool,
-    record_pcap: Option<String>,
     validate: bool,
     help: bool,
 }
@@ -51,27 +32,17 @@ fn parse_args() -> Args {
     let args: Vec<String> = std::env::args().collect();
     let mut result = Args {
         once: false,
-        record_pcap: None,
         validate: false,
         help: false,
     };
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
             "--once" => result.once = true,
-            "--record-pcap" => {
-                if i + 1 < args.len() {
-                    i += 1;
-                    result.record_pcap = Some(args[i].clone());
-                    result.once = true; // Recording implies single run
-                }
-            }
             "--validate" => result.validate = true,
             "--help" | "-h" => result.help = true,
             _ => {}
         }
-        i += 1;
     }
 
     result
@@ -84,8 +55,6 @@ fn print_help() {
     println!("OPTIONS:");
     println!("    --once              Run a single check and exit");
     println!("    --validate          Validate configuration and exit");
-    println!("    --record-pcap FILE  Record RTP packets to pcap file (implies --once)");
-    println!("                        Requires: cargo build --features record");
     println!("    --help, -h          Show this help message\n");
     println!("ENVIRONMENT:");
     println!("    See .env.example for required configuration variables");
@@ -136,12 +105,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Handle --record-pcap mode
-    if let Some(pcap_file) = args.record_pcap {
-        info!("Recording mode: RTP packets will be saved to {}", pcap_file);
-        return run_with_recording(&config, &pcap_file).await;
-    }
-
     // Initialize speech recognizer
     let recognizer = Arc::new(SpeechRecognizer::new(
         &config.whisper_model_path,
@@ -190,67 +153,6 @@ async fn main() -> Result<()> {
     .await;
 
     health_cancel.cancel();
-
-    Ok(())
-}
-
-/// Run a call with RTP packet recording enabled
-async fn run_with_recording(config: &Config, pcap_file: &str) -> Result<()> {
-    info!("Starting call with RTP recording...");
-
-    // Create SIP client
-    let sip_client = SipClient::new(config.clone()).await?;
-
-    // Bind RTP socket FIRST to avoid race condition, then use for both recording and call
-    let (rtp_socket, rtp_port) = find_available_rtp_socket().await?;
-    info!("RTP port will be: {}", rtp_port);
-
-    // Create RTP receiver from the already-bound socket
-    let rtp_receiver = rtp::RtpReceiver::from_socket(rtp_socket);
-
-    // Start recording in a background task
-    // pcap captures at the network level, filtering by the port we've already bound
-    let pcap_path = pcap_file.to_string();
-    let listen_duration = Duration::from_secs(config.listen_duration_secs);
-    let record_duration = listen_duration + Duration::from_secs(5);
-
-    let record_handle = tokio::task::spawn_blocking(move || {
-        rtp::recorder::record_rtp_to_file(&pcap_path, rtp_port, record_duration)
-    });
-
-    // Small delay to ensure pcap is ready
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Make the test call using the pre-bound receiver (no race condition)
-    let cancel_token = CancellationToken::new();
-    let call_result = sip_client
-        .make_test_call_with_receiver(listen_duration, rtp_receiver, cancel_token)
-        .await;
-
-    // Wait a bit for any trailing packets
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    // Recording will stop on its own after duration
-
-    match call_result {
-        Ok(result) => {
-            if result.connected {
-                info!("Call completed. Audio samples: {}", result.audio_samples.len());
-            } else {
-                warn!("Call did not connect: {:?}", result.error);
-            }
-        }
-        Err(e) => {
-            error!("Call failed: {}", e);
-        }
-    }
-
-    // Wait for recording to finish
-    match record_handle.await {
-        Ok(Ok(count)) => info!("Recording complete: {} packets saved to {}", count, pcap_file),
-        Ok(Err(e)) => error!("Recording error: {}", e),
-        Err(e) => error!("Recording task error: {}", e),
-    }
 
     Ok(())
 }
