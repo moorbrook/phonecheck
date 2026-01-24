@@ -1,6 +1,6 @@
 # Formal Verification for PhoneCheck
 
-This directory contains formal verification specifications using Verus and Aeneas/Lean.
+This directory contains formal verification specifications using Aeneas/Lean.
 The main codebase also uses Kani and Stateright for verification.
 
 ## Overview
@@ -9,7 +9,6 @@ The main codebase also uses Kani and Stateright for verification.
 |------|----------|----------------|-----------|
 | **Kani** | Bounded model checking | Inline `#[kani::proof]` | Panic-freedom, exhaustive u8/u16 |
 | **Stateright** | State machine exploration | `state_machine` modules | Protocol correctness, invariants |
-| **Verus** | SMT-based | Inline Rust macros | Full functional correctness |
 | **Aeneas** | Translation to Lean | Separate `.lean` files | Deep mathematical proofs |
 
 ## Bugs Found by Verification
@@ -55,9 +54,6 @@ The main codebase also uses Kani and Stateright for verification.
 
 ```
 verification/
-├── verus/
-│   ├── Cargo.toml
-│   └── src/lib.rs      # Verus specs with requires/ensures
 └── aeneas/
     ├── Cargo.toml
     ├── src/lib.rs      # Aeneas-compatible Rust code
@@ -116,30 +112,6 @@ cargo test --lib circuit_breaker_model
 cargo test --lib sip_model
 ```
 
-## Verus
-
-[Verus](https://github.com/verus-lang/verus) uses SMT solvers to verify Rust code.
-Specifications are written in Rust using the `verus!` macro.
-
-### Properties Specified
-
-- `resample_8k_to_16k`: Output length is exactly 2x input length
-- `seq_is_before`: Trichotomy (exactly one of <, >, == holds)
-- `seq_is_before`: Antisymmetry (if a < b then not b < a)
-- `truncate_sms_message`: Output bounded by MAX_SMS_LENGTH
-
-### Usage
-
-```bash
-# Install Verus
-git clone https://github.com/verus-lang/verus
-cd verus && ./tools/get-z3.sh && cargo build --release
-
-# Verify
-cd verification/verus
-verus src/lib.rs
-```
-
 ## Aeneas / Lean 4
 
 [Aeneas](https://github.com/AeneasVerif/aeneas) translates Rust to Lean 4.
@@ -175,7 +147,6 @@ lake build
 
 ### Sequence Ordering (`is_before`)
 - **Kani**: Trichotomy (excluding midpoint), antisymmetry, wraparound
-- **Verus**: Formal SMT proof of trichotomy and antisymmetry
 - **Aeneas/Lean**: Mathematical proof with bitvector reasoning
 
 ### Jitter Buffer
@@ -191,4 +162,3 @@ lake build
 
 ### SMS Truncation
 - **Kani**: Output length ≤ MAX_SMS_LENGTH, never panics
-- **Verus**: Precondition/postcondition contract
