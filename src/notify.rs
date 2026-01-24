@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
@@ -152,12 +153,17 @@ pub fn calculate_backoff(attempt: u32) -> Duration {
     }
 }
 
+/// Maximum number of alerts to queue when circuit is open
+pub const MAX_QUEUED_ALERTS: usize = 10;
+
 /// Circuit breaker for SMS API
 pub struct CircuitBreaker {
     state: RwLock<CircuitState>,
     consecutive_failures: AtomicU32,
     opened_at: RwLock<Option<Instant>>,
     last_success: RwLock<Option<Instant>>,
+    /// Queue of alerts waiting to be sent when circuit recovers
+    pending_alerts: Mutex<VecDeque<String>>,
 }
 
 impl CircuitBreaker {
@@ -167,7 +173,33 @@ impl CircuitBreaker {
             consecutive_failures: AtomicU32::new(0),
             opened_at: RwLock::new(None),
             last_success: RwLock::new(None),
+            pending_alerts: Mutex::new(VecDeque::new()),
         }
+    }
+
+    /// Queue an alert for later delivery when circuit recovers
+    pub fn queue_alert(&self, message: String) {
+        let mut queue = self.pending_alerts.lock().unwrap();
+        if queue.len() >= MAX_QUEUED_ALERTS {
+            // Drop oldest alert to make room
+            let dropped = queue.pop_front();
+            if let Some(msg) = dropped {
+                warn!("Alert queue full, dropping oldest: {}...", &msg[..msg.len().min(50)]);
+            }
+        }
+        queue.push_back(message);
+        info!("Alert queued for later delivery ({} pending)", queue.len());
+    }
+
+    /// Take all pending alerts from the queue
+    pub fn take_pending_alerts(&self) -> Vec<String> {
+        let mut queue = self.pending_alerts.lock().unwrap();
+        queue.drain(..).collect()
+    }
+
+    /// Get count of pending alerts
+    pub fn pending_count(&self) -> usize {
+        self.pending_alerts.lock().unwrap().len()
     }
 
     /// Check if requests are allowed
@@ -285,14 +317,15 @@ impl Notifier {
 
         // Check circuit breaker
         if !self.circuit.is_allowed() {
-            let msg = format!(
-                "Circuit breaker open - SMS not sent. Message: {}",
-                message
+            // Queue alert for later delivery instead of dropping it
+            self.circuit.queue_alert(message.clone());
+            error!(
+                "Circuit breaker open - alert queued for later ({} pending)",
+                self.circuit.pending_count()
             );
-            error!("{}", msg);
-            // Log to file as fallback
+            // Also log as fallback in case recovery never happens
             self.log_alert_fallback(&message);
-            anyhow::bail!("Circuit breaker open");
+            anyhow::bail!("Circuit breaker open - alert queued");
         }
 
         let mut last_error = None;
@@ -308,6 +341,8 @@ impl Notifier {
                 Ok(()) => {
                     info!("SMS sent successfully");
                     self.circuit.record_success();
+                    // Try to send any queued alerts now that circuit is healthy
+                    self.send_queued_alerts().await;
                     return Ok(());
                 }
                 Err(e) => {
@@ -360,6 +395,39 @@ impl Notifier {
         // In a production system, you might also:
         // - Write to a dedicated alert file
         // - Send via alternative channel (email, webhook, etc.)
+    }
+
+    /// Send any queued alerts after circuit recovery
+    async fn send_queued_alerts(&self) {
+        let pending = self.circuit.take_pending_alerts();
+        if pending.is_empty() {
+            return;
+        }
+
+        info!("Circuit recovered - sending {} queued alerts", pending.len());
+
+        for (i, msg) in pending.iter().enumerate() {
+            // Add small delay between messages to avoid rate limiting
+            if i > 0 {
+                sleep(Duration::from_millis(500)).await;
+            }
+
+            match self.try_send_sms(msg).await {
+                Ok(()) => {
+                    info!("Queued alert {} sent successfully", i + 1);
+                }
+                Err(e) => {
+                    // If sending fails, re-queue remaining alerts and stop
+                    error!("Failed to send queued alert: {}", e);
+                    self.circuit.record_failure();
+                    // Re-queue this and remaining alerts
+                    for remaining in &pending[i..] {
+                        self.circuit.queue_alert(remaining.clone());
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     async fn try_send_sms(&self, message: &str) -> Result<()> {
@@ -586,6 +654,56 @@ mod tests {
 
         let server_err = anyhow::anyhow!("Internal server error");
         assert_eq!(Notifier::classify_error(&server_err), SmsErrorKind::Transient);
+    }
+
+    // === Circuit Breaker Alert Queue tests ===
+
+    #[test]
+    fn test_circuit_breaker_queue_alert() {
+        let cb = CircuitBreaker::new();
+        assert_eq!(cb.pending_count(), 0);
+
+        cb.queue_alert("Alert 1".to_string());
+        assert_eq!(cb.pending_count(), 1);
+
+        cb.queue_alert("Alert 2".to_string());
+        assert_eq!(cb.pending_count(), 2);
+    }
+
+    #[test]
+    fn test_circuit_breaker_take_pending_alerts() {
+        let cb = CircuitBreaker::new();
+        cb.queue_alert("Alert 1".to_string());
+        cb.queue_alert("Alert 2".to_string());
+
+        let alerts = cb.take_pending_alerts();
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[0], "Alert 1");
+        assert_eq!(alerts[1], "Alert 2");
+
+        // Queue should be empty after taking
+        assert_eq!(cb.pending_count(), 0);
+        assert!(cb.take_pending_alerts().is_empty());
+    }
+
+    #[test]
+    fn test_circuit_breaker_queue_overflow() {
+        let cb = CircuitBreaker::new();
+
+        // Fill queue to max
+        for i in 0..MAX_QUEUED_ALERTS {
+            cb.queue_alert(format!("Alert {}", i));
+        }
+        assert_eq!(cb.pending_count(), MAX_QUEUED_ALERTS);
+
+        // Add one more - should drop oldest
+        cb.queue_alert("Newest".to_string());
+        assert_eq!(cb.pending_count(), MAX_QUEUED_ALERTS);
+
+        let alerts = cb.take_pending_alerts();
+        // First alert should have been dropped
+        assert_eq!(alerts.first().unwrap(), "Alert 1");
+        assert_eq!(alerts.last().unwrap(), "Newest");
     }
 
     // === SMS truncation tests ===

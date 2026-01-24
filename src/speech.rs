@@ -14,8 +14,24 @@ impl SpeechRecognizer {
     pub fn new(model_path: &str, expected_phrase: String) -> Result<Self> {
         info!("Loading Whisper model from: {}", model_path);
 
+        // Check if model file exists before attempting to load
+        if !std::path::Path::new(model_path).exists() {
+            anyhow::bail!(
+                "Whisper model not found at '{}'. Download a GGML model from:\n\
+                 https://huggingface.co/ggerganov/whisper.cpp/tree/main\n\
+                 Recommended: ggml-base.en.bin for English (141 MB)",
+                model_path
+            );
+        }
+
         let ctx = WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
-            .context("Failed to load Whisper model")?;
+            .context(format!(
+                "Failed to load Whisper model from '{}'. Possible causes:\n\
+                 - Wrong model format (must be GGML .bin, not PyTorch .pt)\n\
+                 - Corrupted download (re-download the model)\n\
+                 - Insufficient memory (try a smaller model like ggml-tiny.en.bin)",
+                model_path
+            ))?;
 
         info!("Whisper model loaded successfully");
 

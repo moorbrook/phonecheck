@@ -22,6 +22,8 @@ const XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const MAGIC_COOKIE: u32 = 0x2112A442;
 
 /// Default STUN request timeout
+/// 3 seconds is generous for a single UDP round-trip to public STUN servers.
+/// Most responses arrive within 100-500ms; 3s handles slow networks/servers.
 const STUN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Discover public IP address using STUN
@@ -326,6 +328,28 @@ mod tests {
         let result = parse_binding_response(&response, &txn_id);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_discover_public_address_optional_none() {
+        // When no STUN server is configured, should return None immediately
+        let result = discover_public_address_optional(None).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_discover_public_address_optional_invalid_server() {
+        // When STUN server is unreachable, should return None (fallback)
+        // Use an invalid hostname that will fail DNS resolution
+        let result = discover_public_address_optional(Some("invalid.nonexistent.domain.test:3478")).await;
+        assert!(result.is_none(), "Should gracefully return None on STUN failure");
+    }
+
+    #[tokio::test]
+    async fn test_discover_public_address_timeout() {
+        // Use a non-routable IP to trigger timeout (will fail within 3s)
+        let result = discover_public_address_optional(Some("192.0.2.1:3478")).await;
+        assert!(result.is_none(), "Should timeout gracefully");
     }
 }
 

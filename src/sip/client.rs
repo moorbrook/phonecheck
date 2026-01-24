@@ -174,7 +174,19 @@ impl SipClient {
         cancel_token: CancellationToken,
     ) -> Result<CallResult> {
         // Set up RTP receiver on specified port (0 = auto-assign)
-        let mut rtp_receiver = RtpReceiver::bind(rtp_port_hint).await?;
+        let rtp_receiver = RtpReceiver::bind(rtp_port_hint).await?;
+        self.make_test_call_with_receiver(listen_duration, rtp_receiver, cancel_token)
+            .await
+    }
+
+    /// Make a test call using a pre-bound RTP receiver
+    /// Use this to avoid port race conditions when you need the port before the call
+    pub async fn make_test_call_with_receiver(
+        &self,
+        listen_duration: Duration,
+        mut rtp_receiver: RtpReceiver,
+        cancel_token: CancellationToken,
+    ) -> Result<CallResult> {
         let rtp_port = rtp_receiver.local_port()?;
         debug!("RTP receiver ready on port {}", rtp_port);
 
@@ -443,10 +455,12 @@ impl SipClient {
             warn!("Failed to send BYE: {}", e);
         } else {
             // Wait for BYE response (best effort, shorter timeout on cancellation)
+            // 5s normal: allows for network delays and server processing
+            // 2s shutdown: faster exit while still allowing graceful termination
             let bye_timeout = if completed_normally {
                 Duration::from_secs(5)
             } else {
-                Duration::from_secs(2) // Shorter timeout during shutdown
+                Duration::from_secs(2)
             };
 
             match transport.receive(bye_timeout).await {

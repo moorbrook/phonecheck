@@ -21,23 +21,22 @@ use scheduler::run_scheduler;
 use sip::SipClient;
 use speech::SpeechRecognizer;
 
-/// Find an available port in the RTP range (16384-32767)
-async fn find_available_rtp_port() -> Result<u16> {
+/// Find an available port in the RTP range (16384-32767) and return bound socket
+/// Returns both the socket and port to avoid race conditions between finding and rebinding
+async fn find_available_rtp_socket() -> Result<(tokio::net::UdpSocket, u16)> {
     use tokio::net::UdpSocket;
 
     // Try ports in the standard RTP range
     for port in (16384..32768).step_by(2) {
         if let Ok(socket) = UdpSocket::bind(format!("0.0.0.0:{}", port)).await {
-            drop(socket);
-            return Ok(port);
+            return Ok((socket, port));
         }
     }
 
     // Fallback: let OS assign
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     let port = socket.local_addr()?.port();
-    drop(socket);
-    Ok(port)
+    Ok((socket, port))
 }
 
 /// Parse command line arguments
@@ -199,13 +198,15 @@ async fn run_with_recording(config: &Config, pcap_file: &str) -> Result<()> {
     // Create SIP client
     let sip_client = SipClient::new(config.clone()).await?;
 
-    // Bind to a specific port that we'll use for both recording and RTP
-    // Use a port in the typical RTP range (10000-20000)
-    let rtp_port = find_available_rtp_port().await?;
+    // Bind RTP socket FIRST to avoid race condition, then use for both recording and call
+    let (rtp_socket, rtp_port) = find_available_rtp_socket().await?;
     info!("RTP port will be: {}", rtp_port);
 
-    // Start recording in a background task BEFORE binding RTP receiver
-    // pcap captures at the network level, so it doesn't conflict with our socket
+    // Create RTP receiver from the already-bound socket
+    let rtp_receiver = rtp::RtpReceiver::from_socket(rtp_socket);
+
+    // Start recording in a background task
+    // pcap captures at the network level, filtering by the port we've already bound
     let pcap_path = pcap_file.to_string();
     let listen_duration = Duration::from_secs(config.listen_duration_secs);
     let record_duration = listen_duration + Duration::from_secs(5);
@@ -217,9 +218,10 @@ async fn run_with_recording(config: &Config, pcap_file: &str) -> Result<()> {
     // Small delay to ensure pcap is ready
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Make the test call on the specific port
+    // Make the test call using the pre-bound receiver (no race condition)
+    let cancel_token = CancellationToken::new();
     let call_result = sip_client
-        .make_test_call_on_port(listen_duration, rtp_port)
+        .make_test_call_with_receiver(listen_duration, rtp_receiver, cancel_token)
         .await;
 
     // Wait a bit for any trailing packets

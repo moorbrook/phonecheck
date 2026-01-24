@@ -13,9 +13,14 @@ pub struct JitterBufferConfig {
     /// Target buffer depth in packets (default: 3)
     /// Higher values = more jitter tolerance but higher latency
     pub target_depth: u16,
-    /// Maximum buffer size in packets before dropping old packets
+    /// Maximum buffer size in packets before dropping old packets (default: 50)
+    /// When exceeded, OLDEST packets are dropped first (FIFO eviction).
+    /// This prevents unbounded memory growth from extreme network delays.
+    /// At 20ms/packet, 50 packets = 1 second of audio buffer.
     pub max_size: u16,
-    /// Maximum sequence number gap before considering packet lost
+    /// Maximum sequence number gap before considering packets lost (default: 10)
+    /// If the gap exceeds this, the buffer skips ahead to the next available packet.
+    /// At 50 packets/sec, gap of 10 = 200ms of missing audio triggers skip.
     pub max_gap: u16,
 }
 

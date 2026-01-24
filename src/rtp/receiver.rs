@@ -26,6 +26,7 @@ pub struct RtpReceiver {
 }
 
 impl RtpReceiver {
+    /// Bind to a specific port (or 0 for auto-assign)
     pub async fn bind(port: u16) -> Result<Self> {
         let addr = format!("0.0.0.0:{}", port);
         let socket = UdpSocket::bind(&addr)
@@ -40,6 +41,16 @@ impl RtpReceiver {
             samples: Vec::new(),
             jitter_buffer: JitterBuffer::new(JitterBufferConfig::default()),
         })
+    }
+
+    /// Create from an already-bound socket (avoids port race conditions)
+    pub fn from_socket(socket: UdpSocket) -> Self {
+        Self {
+            socket,
+            decoder: None,
+            samples: Vec::new(),
+            jitter_buffer: JitterBuffer::new(JitterBufferConfig::default()),
+        }
     }
 
     pub fn local_port(&self) -> Result<u16> {
@@ -80,6 +91,8 @@ impl RtpReceiver {
             }
 
             // Use select to allow cancellation during receive
+            // 100ms poll interval: short enough for responsive cancellation,
+            // long enough to avoid busy-waiting. RTP packets arrive every 20ms.
             tokio::select! {
                 result = timeout(remaining.min(Duration::from_millis(100)), self.socket.recv_from(&mut buf)) => {
                     match result {

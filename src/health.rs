@@ -4,10 +4,15 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+/// Timeout for reading HTTP request (prevents slow-loris attacks)
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Health status of the service
 #[derive(Debug, Clone)]
@@ -143,7 +148,15 @@ async fn handle_request(
     metrics: &HealthMetrics,
 ) -> std::io::Result<()> {
     let mut buf = [0u8; 1024];
-    let n = socket.read(&mut buf).await?;
+
+    // Apply timeout to prevent slow-loris attacks
+    let n = match timeout(REQUEST_TIMEOUT, socket.read(&mut buf)).await {
+        Ok(result) => result?,
+        Err(_) => {
+            debug!("Request timeout after {:?}", REQUEST_TIMEOUT);
+            return Ok(());
+        }
+    };
 
     if n == 0 {
         return Ok(());
@@ -164,8 +177,11 @@ async fn handle_request(
             build_health_response(&status)
         }
         "/ready" | "/readyz" | "/ready/" => {
-            // Readiness: only healthy if we've had at least one successful check
-            // or we haven't run any checks yet (startup grace period)
+            // Readiness logic for Kubernetes compatibility:
+            // - Before first check (last_check_time == 0): ready=true (startup grace period)
+            //   This prevents pods from being killed before the first check completes.
+            // - After first check: ready = last_check_ok (based on actual check results)
+            // Note: For stricter behavior, use /health which always returns 200 with status.
             let status = metrics.status();
             if status.last_check_ok || status.last_check_time == 0 {
                 build_ready_response(true)
