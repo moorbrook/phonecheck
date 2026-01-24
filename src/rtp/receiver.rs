@@ -484,36 +484,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_fused_matches_separate_operations() {
-        use crate::rtp::g711::G711Decoder;
-
-        // Create sample i16 PCM data
-        let pcm_samples: Vec<i16> = vec![0, 1000, -1000, 16000, -16000, 32000, -32000, 0];
-
-        // Original two-step approach
-        let f32_samples = G711Decoder::pcm_to_f32(&pcm_samples);
-        let resampled_separate = resample_8k_to_16k(&f32_samples);
-
-        // Fused approach (simulating what get_samples_f32 does)
-        let mut fused_output = Vec::with_capacity(pcm_samples.len() * 2);
-        for i in 0..pcm_samples.len() {
-            let sample = pcm_samples[i] as f32 / 32768.0;
-            fused_output.push(sample);
-            if i + 1 < pcm_samples.len() {
-                let next = pcm_samples[i + 1] as f32 / 32768.0;
-                fused_output.push((sample + next) * 0.5);
-            } else {
-                fused_output.push(sample);
-            }
-        }
-
-        // Compare results
-        assert_eq!(resampled_separate.len(), fused_output.len());
-        for (a, b) in resampled_separate.iter().zip(fused_output.iter()) {
-            assert!((a - b).abs() < 1e-6, "Mismatch: {} vs {}", a, b);
-        }
-    }
+    // Removed: test_fused_matches_separate_operations was a tautology
+    // (reimplemented the algorithm in the test). Use oracle tests instead.
 
     // === parse_rtp_header tests ===
 
@@ -693,33 +665,8 @@ mod proptests {
             prop_assert_eq!(offset, 12);
         }
 
-        /// Fused i16→f32+resample matches separate operations
-        #[test]
-        fn fused_matches_separate(samples in proptest::collection::vec(-32768i16..32767i16, 1..50)) {
-            use crate::rtp::g711::G711Decoder;
-
-            // Original two-step approach
-            let f32_samples = G711Decoder::pcm_to_f32(&samples);
-            let resampled_separate = resample_8k_to_16k(&f32_samples);
-
-            // Fused approach
-            let mut fused_output = Vec::with_capacity(samples.len() * 2);
-            for i in 0..samples.len() {
-                let sample = samples[i] as f32 / 32768.0;
-                fused_output.push(sample);
-                if i + 1 < samples.len() {
-                    let next = samples[i + 1] as f32 / 32768.0;
-                    fused_output.push((sample + next) * 0.5);
-                } else {
-                    fused_output.push(sample);
-                }
-            }
-
-            prop_assert_eq!(resampled_separate.len(), fused_output.len());
-            for (a, b) in resampled_separate.iter().zip(fused_output.iter()) {
-                prop_assert!((a - b).abs() < 1e-6);
-            }
-        }
+        // Removed: fused_matches_separate was a tautology (shadow implementation).
+        // Oracle-based tests are in tests/adversarial_rtp.rs instead.
     }
 }
 

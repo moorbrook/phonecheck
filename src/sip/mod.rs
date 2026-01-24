@@ -1,6 +1,6 @@
 mod client;
-mod digest;
-mod messages;
+pub mod digest;
+pub mod messages;
 mod transport;
 
 #[cfg(test)]

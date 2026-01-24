@@ -1,8 +1,8 @@
 pub mod g711;
 pub mod jitter;
 pub mod player;
+pub mod receiver;
 pub mod recorder;
-mod receiver;
 
 pub use player::{replay_to_socket, RtpPacket};
 #[cfg(test)]
