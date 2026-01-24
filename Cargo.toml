@@ -1,0 +1,63 @@
+[package]
+name = "phonecheck"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# SIP protocol
+rsip = "0.4"
+
+# RTP and media
+bytes = "1"
+
+# Speech recognition (whisper.cpp bindings - requires cmake)
+whisper-rs = "0.15"
+
+# HTTP client for voip.ms API
+reqwest = { version = "0.12", features = ["json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Environment/config
+dotenvy = "0.15"
+
+# Scheduling
+tokio-cron-scheduler = "0.13"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time handling with timezone
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Random for SIP Call-ID, tags, etc.
+rand = "0.8"
+
+# URL encoding for SMS API
+urlencoding = "2"
+
+[dev-dependencies]
+# Property-based testing
+proptest = "1"
+
+# Test utilities
+tokio-test = "0.4"
+
+# Model checking for state machines
+stateright = "0.31"
+
+# Formal verification (run with: cargo kani)
+# Install: cargo install kani-verifier && cargo kani setup
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
