@@ -1,12 +1,23 @@
 /// SIP UDP Transport Layer
 /// Handles sending and receiving SIP messages over UDP
+///
+/// Implements RFC 3261 Timer A retransmission for INVITE over UDP:
+/// - Timer A starts at T1 (500ms), doubles each retransmit
+/// - Timer B (transaction timeout) is 64*T1 = 32 seconds
+/// - Retransmission stops on any response
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
+
+/// RFC 3261 Timer T1 - RTT estimate (500ms default)
+pub const T1: Duration = Duration::from_millis(500);
+
+/// RFC 3261 Timer B - INVITE transaction timeout (64 * T1 = 32s)
+pub const TIMER_B: Duration = Duration::from_secs(32);
 
 pub struct SipTransport {
     socket: UdpSocket,
@@ -90,6 +101,172 @@ impl SipTransport {
             attempts += 1;
             if attempts >= max_retries {
                 anyhow::bail!("Max retries reached waiting for final response");
+            }
+        }
+    }
+
+    /// Send INVITE with RFC 3261 Timer A retransmission
+    ///
+    /// Implements the INVITE client transaction state machine:
+    /// - Sends INVITE, starts Timer A at T1 (500ms)
+    /// - On timeout: retransmit INVITE, double Timer A
+    /// - On any response: stop retransmitting
+    /// - Timer B (32s): overall transaction timeout
+    ///
+    /// Returns the first response received (may be provisional or final)
+    pub async fn send_invite_with_retransmit(&self, invite: &str) -> Result<String> {
+        let transaction_start = tokio::time::Instant::now();
+        let mut timer_a = T1;
+        let mut retransmit_count = 0u32;
+
+        // Send initial INVITE
+        self.send(invite).await?;
+        debug!("Sent INVITE (initial), Timer A = {:?}", timer_a);
+
+        loop {
+            // Check Timer B (overall transaction timeout)
+            if transaction_start.elapsed() >= TIMER_B {
+                anyhow::bail!(
+                    "INVITE transaction timeout (Timer B = {:?}) after {} retransmits",
+                    TIMER_B,
+                    retransmit_count
+                );
+            }
+
+            // Wait for response with Timer A timeout
+            match self.receive(timer_a).await {
+                Ok(response) => {
+                    // Got a response - return it (caller handles provisional vs final)
+                    if let Some(code) = super::messages::parse_status_code(&response) {
+                        debug!(
+                            "Received {} response after {} retransmits",
+                            code, retransmit_count
+                        );
+                    }
+                    return Ok(response);
+                }
+                Err(e) => {
+                    // Timeout - check if it's a receive timeout vs other error
+                    let err_str = e.to_string().to_lowercase();
+                    if !err_str.contains("timeout") {
+                        return Err(e);
+                    }
+
+                    // Timer A expired - retransmit
+                    retransmit_count += 1;
+
+                    // Check Timer B before retransmitting
+                    if transaction_start.elapsed() >= TIMER_B {
+                        anyhow::bail!(
+                            "INVITE transaction timeout (Timer B = {:?}) after {} retransmits",
+                            TIMER_B,
+                            retransmit_count
+                        );
+                    }
+
+                    warn!(
+                        "INVITE timeout, retransmitting (attempt {}, Timer A = {:?})",
+                        retransmit_count + 1,
+                        timer_a
+                    );
+
+                    self.send(invite).await?;
+
+                    // Double Timer A for next iteration (RFC 3261 exponential backoff)
+                    // Cap at T2 (4 seconds) for non-INVITE, but INVITE uses uncapped exponential
+                    // until Timer B expires
+                    timer_a = timer_a.saturating_mul(2);
+
+                    // Cap timer_a at remaining time until Timer B
+                    let remaining = TIMER_B.saturating_sub(transaction_start.elapsed());
+                    if timer_a > remaining {
+                        timer_a = remaining;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Send INVITE and wait for final response with retransmission
+    ///
+    /// Combines send_invite_with_retransmit with provisional response handling.
+    /// Returns the final (2xx-6xx) response.
+    pub async fn send_invite_await_final(&self, invite: &str) -> Result<String> {
+        let transaction_start = tokio::time::Instant::now();
+        let mut timer_a = T1;
+        let mut retransmit_count = 0u32;
+        let mut in_proceeding = false; // True after receiving 1xx
+
+        // Send initial INVITE
+        self.send(invite).await?;
+        debug!("Sent INVITE (initial), Timer A = {:?}", timer_a);
+
+        loop {
+            // Check Timer B
+            let elapsed = transaction_start.elapsed();
+            if elapsed >= TIMER_B {
+                anyhow::bail!(
+                    "INVITE transaction timeout (Timer B = {:?}) after {} retransmits",
+                    TIMER_B,
+                    retransmit_count
+                );
+            }
+
+            let remaining = TIMER_B.saturating_sub(elapsed);
+            let wait_time = timer_a.min(remaining);
+
+            match self.receive(wait_time).await {
+                Ok(response) => {
+                    if let Some(code) = super::messages::parse_status_code(&response) {
+                        if code >= 200 {
+                            // Final response
+                            debug!(
+                                "Received final response {} after {} retransmits",
+                                code, retransmit_count
+                            );
+                            return Ok(response);
+                        } else {
+                            // Provisional response - stop retransmitting, wait for final
+                            debug!("Received provisional response {}", code);
+                            in_proceeding = true;
+                            // After receiving 1xx, we stop retransmitting and just wait
+                            // Reset timer to wait for final response
+                            timer_a = TIMER_B.saturating_sub(transaction_start.elapsed());
+                        }
+                    }
+                }
+                Err(e) => {
+                    let err_str = e.to_string().to_lowercase();
+                    if !err_str.contains("timeout") {
+                        return Err(e);
+                    }
+
+                    // Only retransmit if we haven't received any provisional response
+                    if !in_proceeding {
+                        retransmit_count += 1;
+
+                        // Check Timer B before retransmitting
+                        if transaction_start.elapsed() >= TIMER_B {
+                            anyhow::bail!(
+                                "INVITE transaction timeout (Timer B = {:?}) after {} retransmits",
+                                TIMER_B,
+                                retransmit_count
+                            );
+                        }
+
+                        warn!(
+                            "INVITE timeout, retransmitting (attempt {}, Timer A = {:?})",
+                            retransmit_count + 1,
+                            timer_a
+                        );
+
+                        self.send(invite).await?;
+
+                        // Double Timer A
+                        timer_a = timer_a.saturating_mul(2);
+                    }
+                    // If in_proceeding, we just keep waiting without retransmitting
+                }
             }
         }
     }
@@ -250,5 +427,77 @@ mod proptests {
             prop_assert!(duration.as_millis() >= 1);
             prop_assert!(duration.as_millis() <= 10000);
         }
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+
+    #[test]
+    fn test_t1_value() {
+        // RFC 3261: T1 should be 500ms
+        assert_eq!(T1, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_timer_b_value() {
+        // RFC 3261: Timer B = 64 * T1 = 32 seconds
+        assert_eq!(TIMER_B, Duration::from_secs(32));
+        assert_eq!(TIMER_B, T1 * 64);
+    }
+
+    #[test]
+    fn test_exponential_backoff_sequence() {
+        // Verify the Timer A doubling sequence
+        let mut timer = T1;
+        let expected = [500, 1000, 2000, 4000, 8000, 16000];
+
+        for (i, expected_ms) in expected.iter().enumerate() {
+            assert_eq!(
+                timer.as_millis() as u64,
+                *expected_ms,
+                "Timer A at iteration {} should be {}ms",
+                i,
+                expected_ms
+            );
+            timer = timer.saturating_mul(2);
+        }
+    }
+
+    #[test]
+    fn test_timer_a_capped_by_timer_b() {
+        // After enough doublings, Timer A should be capped by remaining Timer B time
+        let mut timer = T1;
+
+        // Double 7 times: 500 -> 1000 -> 2000 -> 4000 -> 8000 -> 16000 -> 32000 -> 64000
+        for _ in 0..7 {
+            timer = timer.saturating_mul(2);
+        }
+
+        // At this point timer is 64000ms = 64s, exceeds Timer B
+        assert!(timer > TIMER_B);
+
+        // In real code, we cap it
+        let capped = timer.min(TIMER_B);
+        assert_eq!(capped, TIMER_B);
+    }
+
+    #[test]
+    fn test_total_retransmit_time() {
+        // Calculate total time if all retransmits happen
+        // 500 + 1000 + 2000 + 4000 + 8000 + 16000 = 31500ms < 32000ms Timer B
+        // So we get ~6 retransmits before Timer B expires
+        let mut total = Duration::ZERO;
+        let mut timer = T1;
+
+        while total + timer < TIMER_B {
+            total += timer;
+            timer = timer.saturating_mul(2);
+        }
+
+        // Should have accumulated significant time
+        assert!(total.as_millis() > 30000);
+        assert!(total < TIMER_B);
     }
 }

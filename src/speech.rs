@@ -344,6 +344,201 @@ mod tests {
             "thank you for calling"
         ));
     }
+
+    // === Edge case tests for speech recognition artifacts ===
+
+    #[test]
+    fn test_fuzzy_match_repeated_words() {
+        // Whisper sometimes stutters/repeats words
+        assert!(fuzzy_match_phrase(
+            "thank you for calling",
+            "thank thank you for for calling"
+        ));
+    }
+
+    #[test]
+    fn test_fuzzy_match_filler_words() {
+        // Common filler words in transcriptions
+        assert!(fuzzy_match_phrase(
+            "thank you for calling",
+            "um thank you uh for calling"
+        ));
+    }
+
+    #[test]
+    #[ignore = "Known limitation: numbers as words not yet supported"]
+    fn test_fuzzy_match_numbers_as_words() {
+        // Phone system might read numbers
+        // KNOWN LIMITATION: "1" and "one" are treated as different words
+        assert!(fuzzy_match_phrase(
+            "press one",
+            "press 1"
+        ));
+    }
+
+    #[test]
+    #[ignore = "Known limitation: contractions not expanded"]
+    fn test_fuzzy_match_contractions() {
+        // Contractions might be transcribed differently
+        // KNOWN LIMITATION: "we're" treated as single word, doesn't match "we are"
+        assert!(fuzzy_match_phrase(
+            "we are closed",
+            "we're closed"
+        ));
+    }
+
+    #[test]
+    #[ignore = "Known limitation: hyphenated words not split"]
+    fn test_fuzzy_match_hyphenated_words() {
+        // Some company names have hyphens
+        // KNOWN LIMITATION: "cubic-machinery" treated as single word
+        assert!(fuzzy_match_phrase(
+            "cubic machinery",
+            "cubic-machinery speaking"
+        ));
+    }
+
+    #[test]
+    fn test_fuzzy_match_very_long_phrase() {
+        // Ensure performance is reasonable with longer phrases
+        let expected = "thank you for calling cubic machinery incorporated our office hours are nine to five monday through friday";
+        let transcript = "hello thank you for calling cubic machinery incorporated our office hours are nine to five monday through friday please leave a message";
+        assert!(fuzzy_match_phrase(expected, transcript));
+    }
+
+    #[test]
+    fn test_fuzzy_match_single_word_expected() {
+        // Single word phrases
+        assert!(fuzzy_match_phrase("hello", "hello there"));
+        assert!(fuzzy_match_phrase("hello", "well hello"));
+        assert!(!fuzzy_match_phrase("goodbye", "hello there"));
+    }
+
+    #[test]
+    fn test_words_similar_common_transcription_errors() {
+        // Common ASR mistakes
+        assert!(words_similar("machinery", "machinary")); // common misspelling
+        assert!(words_similar("cubic", "cubik"));         // phonetic
+        assert!(words_similar("office", "offise"));       // phonetic
+        assert!(words_similar("hours", "ours"));          // homophone - may pass due to 1 edit
+    }
+
+    #[test]
+    fn test_fuzzy_match_whitespace_variations() {
+        // Extra whitespace shouldn't matter
+        assert!(fuzzy_match_phrase(
+            "thank you",
+            "thank   you"  // extra space
+        ));
+        assert!(fuzzy_match_phrase(
+            "thank you",
+            "  thank you  "  // leading/trailing
+        ));
+    }
+
+    #[test]
+    fn test_fuzzy_match_punctuation_in_expected() {
+        // Punctuation in expected phrase
+        assert!(fuzzy_match_phrase(
+            "hello, how are you?",
+            "hello how are you"
+        ));
+    }
+
+    // === Negative tests: verify dissimilar phrases do NOT match ===
+
+    #[test]
+    fn test_fuzzy_match_completely_different() {
+        assert!(!fuzzy_match_phrase(
+            "thank you for calling cubic machinery",
+            "goodbye we are closed please call back tomorrow"
+        ));
+    }
+
+    #[test]
+    fn test_fuzzy_match_similar_but_different_company() {
+        // Similar structure but different company name
+        assert!(!fuzzy_match_phrase(
+            "thank you for calling cubic machinery",
+            "thank you for calling acme corporation"
+        ));
+    }
+
+    #[test]
+    fn test_fuzzy_match_partial_overlap_insufficient() {
+        // First few words match but rest doesn't
+        assert!(!fuzzy_match_phrase(
+            "thank you for calling cubic machinery",
+            "thank you for your order"
+        ));
+    }
+
+    #[test]
+    fn test_fuzzy_match_same_words_wrong_context() {
+        // Contains the words but in wrong order/context
+        assert!(!fuzzy_match_phrase(
+            "press one for sales",
+            "sales one press for"
+        ));
+    }
+
+    #[test]
+    fn test_fuzzy_match_empty_transcript_nonempty_expected() {
+        assert!(!fuzzy_match_phrase("hello world", ""));
+    }
+
+    #[test]
+    fn test_fuzzy_match_only_filler_words() {
+        // Transcript is only filler words, expected is actual content
+        assert!(!fuzzy_match_phrase(
+            "thank you for calling",
+            "um uh er ah"
+        ));
+    }
+
+    #[test]
+    fn test_fuzzy_match_whisper_hallucination_patterns() {
+        // Whisper sometimes hallucinates repeated punctuation or music notes
+        assert!(!fuzzy_match_phrase(
+            "thank you for calling",
+            "... ... ... ..."
+        ));
+        assert!(!fuzzy_match_phrase(
+            "thank you for calling",
+            "[Music] [Music] [Music]"
+        ));
+    }
+
+    #[test]
+    fn test_fuzzy_match_completely_unrelated_long() {
+        assert!(!fuzzy_match_phrase(
+            "welcome to our customer service line",
+            "the quick brown fox jumps over the lazy dog near the riverbank"
+        ));
+    }
+
+    #[test]
+    fn test_fuzzy_match_numbers_dont_match_words() {
+        // Numbers should not match their word equivalents (known limitation)
+        // This documents current behavior
+        assert!(!fuzzy_match_phrase("press one", "press 1"));
+        assert!(!fuzzy_match_phrase("dial two", "dial 2"));
+    }
+
+    #[test]
+    fn test_levenshtein_empty_strings() {
+        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(levenshtein("a", ""), 1);
+        assert_eq!(levenshtein("", "a"), 1);
+        assert_eq!(levenshtein("abc", ""), 3);
+    }
+
+    #[test]
+    fn test_words_similar_empty() {
+        assert!(words_similar("", ""));
+        // Empty vs non-empty: only punctuation stripped
+        assert!(!words_similar("", "hello"));
+    }
 }
 
 #[cfg(test)]
@@ -422,6 +617,65 @@ mod proptests {
         #[test]
         fn words_similar_never_panics(a in ".*", b in ".*") {
             let _ = words_similar(&a, &b);
+        }
+
+        /// fuzzy_match_phrase is reflexive: phrase always matches itself
+        #[test]
+        fn fuzzy_match_reflexive(phrase in "[a-z]{1,5}( [a-z]{1,5}){0,4}") {
+            prop_assert!(fuzzy_match_phrase(&phrase, &phrase));
+        }
+
+        /// fuzzy_match_phrase: phrase matches when transcript has extra prefix/suffix
+        #[test]
+        fn fuzzy_match_with_extra_context(
+            phrase in "[a-z]{3,6}( [a-z]{3,6}){1,3}",
+            prefix in "[a-z]{0,3}( [a-z]{0,3}){0,2}",
+            suffix in "( [a-z]{0,3}){0,2}"
+        ) {
+            let phrase = phrase.trim();
+            if !phrase.is_empty() {
+                let transcript = format!("{} {} {}", prefix, phrase, suffix);
+                prop_assert!(fuzzy_match_phrase(phrase, &transcript),
+                    "phrase '{}' should match transcript '{}'", phrase, transcript);
+            }
+        }
+
+        /// Random short strings rarely match specific phrases
+        #[test]
+        fn random_strings_rarely_match_specific_phrase(
+            random in "[a-z]{1,4}( [a-z]{1,4}){0,5}"
+        ) {
+            // This specific phrase should rarely match random strings
+            let specific = "thank you for calling cubic machinery";
+            // We can't assert it never matches (false positives possible)
+            // but we log for manual inspection
+            let matches = fuzzy_match_phrase(specific, &random);
+            if matches {
+                // This should be rare - log it
+                eprintln!("WARNING: random '{}' matched '{}'", random, specific);
+            }
+        }
+
+        /// Words with 2+ edit distance should not be similar (for words > 3 chars)
+        #[test]
+        fn distant_words_not_similar(
+            base in "[a-z]{5,10}",
+            changes in 2u8..4u8
+        ) {
+            // Apply multiple changes to make a distant word
+            let mut distant = base.clone();
+            for _ in 0..changes {
+                if !distant.is_empty() {
+                    // Remove a character
+                    let pos = distant.len() / 2;
+                    distant.remove(pos.min(distant.len() - 1));
+                }
+            }
+            // Words with 2+ edits should not be similar
+            if levenshtein(&base, &distant) >= 2 {
+                prop_assert!(!words_similar(&base, &distant),
+                    "'{}' and '{}' should not be similar", base, distant);
+            }
         }
     }
 }

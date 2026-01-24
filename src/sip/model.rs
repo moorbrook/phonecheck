@@ -11,6 +11,10 @@ pub enum CallState {
     Idle,
     Inviting { retries: u8 },
     Proceeding,
+    /// Received 401/407, about to retry with auth
+    Authenticating,
+    /// Sent authenticated INVITE, waiting for response
+    InvitingWithAuth { retries: u8 },
     Established,
     Terminating,
     Terminated,
@@ -24,9 +28,12 @@ pub enum SipAction {
     Receive100Trying,
     Receive180Ringing,
     Receive200Ok,
+    Receive401Unauthorized,
     Receive4xx,
     Receive5xx,
     InviteTimeout,
+    /// Send ACK for 401/407 then retry with auth
+    SendAuthenticatedInvite,
     ReceiveRtp,
     AudioComplete,
     SendBye,
@@ -41,6 +48,10 @@ pub struct CallModel {
     pub rtp_active: bool,
     pub rtp_packets: u32,
     pub bye_sent: bool,
+    /// Whether password is configured (enables auth retry)
+    pub has_password: bool,
+    /// Whether we've already attempted authentication
+    pub auth_attempted: bool,
 }
 
 /// Configuration for the model checker
@@ -64,12 +75,25 @@ impl Model for SipCallChecker {
     type Action = SipAction;
 
     fn init_states(&self) -> Vec<Self::State> {
-        vec![CallModel {
-            state: CallState::Idle,
-            rtp_active: false,
-            rtp_packets: 0,
-            bye_sent: false,
-        }]
+        // Model both scenarios: with and without password configured
+        vec![
+            CallModel {
+                state: CallState::Idle,
+                rtp_active: false,
+                rtp_packets: 0,
+                bye_sent: false,
+                has_password: true,
+                auth_attempted: false,
+            },
+            CallModel {
+                state: CallState::Idle,
+                rtp_active: false,
+                rtp_packets: 0,
+                bye_sent: false,
+                has_password: false,
+                auth_attempted: false,
+            },
+        ]
     }
 
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
@@ -83,6 +107,7 @@ impl Model for SipCallChecker {
                 actions.push(SipAction::Receive100Trying);
                 actions.push(SipAction::Receive180Ringing);
                 actions.push(SipAction::Receive200Ok);
+                actions.push(SipAction::Receive401Unauthorized);
                 actions.push(SipAction::Receive4xx);
                 actions.push(SipAction::Receive5xx);
                 // Timeout (may retry or fail)
@@ -94,8 +119,31 @@ impl Model for SipCallChecker {
             CallState::Proceeding => {
                 actions.push(SipAction::Receive180Ringing);
                 actions.push(SipAction::Receive200Ok);
+                actions.push(SipAction::Receive401Unauthorized);
                 actions.push(SipAction::Receive4xx);
                 actions.push(SipAction::Receive5xx);
+            }
+
+            CallState::Authenticating => {
+                // Can only proceed if we have a password
+                if state.has_password {
+                    actions.push(SipAction::SendAuthenticatedInvite);
+                }
+                // If no password, this state leads to Failed (handled in next_state)
+            }
+
+            CallState::InvitingWithAuth { retries } => {
+                // Same as Inviting but no 401 retry (already authenticated)
+                actions.push(SipAction::Receive100Trying);
+                actions.push(SipAction::Receive180Ringing);
+                actions.push(SipAction::Receive200Ok);
+                // 401 after auth means wrong credentials - fail
+                actions.push(SipAction::Receive401Unauthorized);
+                actions.push(SipAction::Receive4xx);
+                actions.push(SipAction::Receive5xx);
+                if *retries < self.max_retries {
+                    actions.push(SipAction::InviteTimeout);
+                }
             }
 
             CallState::Established => {
@@ -134,39 +182,101 @@ impl Model for SipCallChecker {
             }
 
             SipAction::Receive100Trying => {
-                if matches!(state.state, CallState::Inviting { .. }) {
-                    next.state = CallState::Proceeding;
+                match state.state {
+                    CallState::Inviting { .. } => {
+                        next.state = CallState::Proceeding;
+                    }
+                    CallState::InvitingWithAuth { .. } => {
+                        next.state = CallState::Proceeding;
+                    }
+                    _ => {}
                 }
             }
 
             SipAction::Receive180Ringing => {
-                if matches!(state.state, CallState::Inviting { .. } | CallState::Proceeding) {
+                if matches!(
+                    state.state,
+                    CallState::Inviting { .. }
+                        | CallState::InvitingWithAuth { .. }
+                        | CallState::Proceeding
+                ) {
                     next.state = CallState::Proceeding;
                 }
             }
 
             SipAction::Receive200Ok => {
-                if matches!(state.state, CallState::Inviting { .. } | CallState::Proceeding) {
+                if matches!(
+                    state.state,
+                    CallState::Inviting { .. }
+                        | CallState::InvitingWithAuth { .. }
+                        | CallState::Proceeding
+                ) {
                     next.state = CallState::Established;
                     next.rtp_active = true;
                 }
             }
 
+            SipAction::Receive401Unauthorized => {
+                match &state.state {
+                    CallState::Inviting { .. } | CallState::Proceeding => {
+                        if !state.auth_attempted && state.has_password {
+                            // First 401 with password - try to authenticate
+                            next.state = CallState::Authenticating;
+                        } else {
+                            // No password or already tried auth - fail
+                            next.state = CallState::Failed;
+                        }
+                    }
+                    CallState::InvitingWithAuth { .. } => {
+                        // 401 after sending auth means wrong credentials
+                        next.state = CallState::Failed;
+                    }
+                    _ => {}
+                }
+            }
+
             SipAction::Receive4xx | SipAction::Receive5xx => {
-                if matches!(state.state, CallState::Inviting { .. } | CallState::Proceeding) {
+                if matches!(
+                    state.state,
+                    CallState::Inviting { .. }
+                        | CallState::InvitingWithAuth { .. }
+                        | CallState::Proceeding
+                ) {
                     next.state = CallState::Failed;
                 }
             }
 
             SipAction::InviteTimeout => {
-                if let CallState::Inviting { retries } = state.state {
-                    if retries < self.max_retries {
-                        next.state = CallState::Inviting {
-                            retries: retries + 1,
-                        };
-                    } else {
-                        next.state = CallState::Failed;
+                match state.state {
+                    CallState::Inviting { retries } => {
+                        if retries < self.max_retries {
+                            next.state = CallState::Inviting {
+                                retries: retries + 1,
+                            };
+                        } else {
+                            next.state = CallState::Failed;
+                        }
                     }
+                    CallState::InvitingWithAuth { retries } => {
+                        if retries < self.max_retries {
+                            next.state = CallState::InvitingWithAuth {
+                                retries: retries + 1,
+                            };
+                        } else {
+                            next.state = CallState::Failed;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            SipAction::SendAuthenticatedInvite => {
+                if state.state == CallState::Authenticating && state.has_password {
+                    next.state = CallState::InvitingWithAuth { retries: 0 };
+                    next.auth_attempted = true;
+                } else if state.state == CallState::Authenticating && !state.has_password {
+                    // No password configured - fail
+                    next.state = CallState::Failed;
                 }
             }
 
@@ -239,6 +349,30 @@ mod tests {
     use super::*;
     use stateright::Checker;
 
+    /// Helper to create initial state with password
+    fn init_with_password() -> CallModel {
+        CallModel {
+            state: CallState::Idle,
+            rtp_active: false,
+            rtp_packets: 0,
+            bye_sent: false,
+            has_password: true,
+            auth_attempted: false,
+        }
+    }
+
+    /// Helper to create initial state without password
+    fn init_without_password() -> CallModel {
+        CallModel {
+            state: CallState::Idle,
+            rtp_active: false,
+            rtp_packets: 0,
+            bye_sent: false,
+            has_password: false,
+            auth_attempted: false,
+        }
+    }
+
     #[test]
     fn sip_model_check_safety() {
         // Check all safety properties
@@ -256,10 +390,10 @@ mod tests {
         let checker = SipCallChecker::default().checker().spawn_bfs().join();
 
         // Verify we explored a reasonable number of states
-        // With max_retries=3 and max_rtp_packets=5, we should have many states
+        // With max_retries=3, max_rtp_packets=5, and auth states, we should have many states
         assert!(
-            checker.unique_state_count() > 10,
-            "Expected more than 10 states, got {}",
+            checker.unique_state_count() > 20,
+            "Expected more than 20 states, got {}",
             checker.unique_state_count()
         );
     }
@@ -269,7 +403,7 @@ mod tests {
         // Verify specific path: Idle → Inviting → Proceeding → Established → Terminating → Terminated
         let model = SipCallChecker::default();
 
-        let mut state = model.init_states()[0].clone();
+        let mut state = init_with_password();
         assert_eq!(state.state, CallState::Idle);
 
         // Send INVITE
@@ -314,7 +448,7 @@ mod tests {
     fn sip_model_failed_call_path() {
         let model = SipCallChecker::default();
 
-        let mut state = model.init_states()[0].clone();
+        let mut state = init_with_password();
 
         // Send INVITE
         state = model
@@ -331,7 +465,7 @@ mod tests {
     fn sip_model_timeout_retry_path() {
         let model = SipCallChecker::default();
 
-        let mut state = model.init_states()[0].clone();
+        let mut state = init_with_password();
 
         // Send INVITE
         state = model
@@ -350,5 +484,92 @@ mod tests {
             .next_state(&state, SipAction::Receive200Ok)
             .unwrap();
         assert_eq!(state.state, CallState::Established);
+    }
+
+    #[test]
+    fn sip_model_auth_success_path() {
+        // Verify: Idle → Inviting → 401 → Authenticating → InvitingWithAuth → 200 OK → Established
+        let model = SipCallChecker::default();
+
+        let mut state = init_with_password();
+
+        // Send INVITE
+        state = model
+            .next_state(&state, SipAction::SendInvite)
+            .unwrap();
+        assert!(matches!(state.state, CallState::Inviting { retries: 0 }));
+
+        // Receive 401 Unauthorized
+        state = model
+            .next_state(&state, SipAction::Receive401Unauthorized)
+            .unwrap();
+        assert_eq!(state.state, CallState::Authenticating);
+        assert!(!state.auth_attempted);
+
+        // Send authenticated INVITE
+        state = model
+            .next_state(&state, SipAction::SendAuthenticatedInvite)
+            .unwrap();
+        assert!(matches!(
+            state.state,
+            CallState::InvitingWithAuth { retries: 0 }
+        ));
+        assert!(state.auth_attempted);
+
+        // Receive 200 OK
+        state = model
+            .next_state(&state, SipAction::Receive200Ok)
+            .unwrap();
+        assert_eq!(state.state, CallState::Established);
+        assert!(state.rtp_active);
+    }
+
+    #[test]
+    fn sip_model_auth_failure_no_password() {
+        // Verify: without password, 401 leads directly to Failed
+        let model = SipCallChecker::default();
+
+        let mut state = init_without_password();
+
+        // Send INVITE
+        state = model
+            .next_state(&state, SipAction::SendInvite)
+            .unwrap();
+
+        // Receive 401 Unauthorized - should fail directly without password
+        state = model
+            .next_state(&state, SipAction::Receive401Unauthorized)
+            .unwrap();
+        assert_eq!(state.state, CallState::Failed);
+    }
+
+    #[test]
+    fn sip_model_auth_wrong_credentials() {
+        // Verify: 401 after auth → Failed
+        let model = SipCallChecker::default();
+
+        let mut state = init_with_password();
+
+        // Send INVITE
+        state = model
+            .next_state(&state, SipAction::SendInvite)
+            .unwrap();
+
+        // Receive 401
+        state = model
+            .next_state(&state, SipAction::Receive401Unauthorized)
+            .unwrap();
+
+        // Send authenticated INVITE
+        state = model
+            .next_state(&state, SipAction::SendAuthenticatedInvite)
+            .unwrap();
+        assert!(matches!(state.state, CallState::InvitingWithAuth { .. }));
+
+        // Receive another 401 (wrong credentials)
+        state = model
+            .next_state(&state, SipAction::Receive401Unauthorized)
+            .unwrap();
+        assert_eq!(state.state, CallState::Failed);
     }
 }

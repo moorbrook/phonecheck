@@ -47,7 +47,30 @@ rand = "0.8"
 # URL encoding for SMS API
 urlencoding = "2"
 
+# STUN client for NAT traversal
+stun_codec = "0.3"
+bytecodec = "0.4"
+
+# Async utilities (CancellationToken for graceful shutdown)
+tokio-util = "0.7"
+
+# Digest authentication (RFC 2617/7616)
+md-5 = "0.10"
+digest = "0.10"
+
+# High-quality audio resampling
+rubato = "0.16"
+
+# Packet capture (optional, requires libpcap)
+pcap = { version = "2.4", optional = true }
+
+[features]
+default = []
+record = ["pcap"]
+
 [dev-dependencies]
+# For reading pcap files in tests (no libpcap required)
+pcap-file = "2"
 # Property-based testing
 proptest = "1"
 

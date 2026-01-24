@@ -29,15 +29,22 @@ src/
 ├── main.rs          # Entry point, CLI args, orchestration
 ├── config.rs        # Environment variable loading
 ├── scheduler.rs     # Business hours scheduling (8am-5pm Pacific)
+├── redact.rs        # PII redaction for logging (phone numbers)
 ├── sip/             # SIP protocol implementation
+│   ├── mod.rs       # Module exports
 │   ├── client.rs    # SIP UAC (outbound call logic)
+│   ├── digest.rs    # RFC 2617/7616 digest authentication
 │   ├── messages.rs  # SIP message building (INVITE, ACK, BYE)
-│   └── transport.rs # UDP transport layer
+│   ├── transport.rs # UDP transport layer
+│   └── model.rs     # Stateright model for state machine verification
 ├── rtp/             # RTP audio handling
+│   ├── mod.rs       # Module exports
 │   ├── receiver.rs  # RTP packet reception and reassembly
-│   └── g711.rs      # G.711 u-law/A-law codec (lookup tables from ITU-T spec)
+│   ├── g711.rs      # G.711 u-law/A-law codec (lookup tables from ITU-T spec)
+│   ├── player.rs    # Audio playback utilities (testing)
+│   └── recorder.rs  # RTP packet capture to pcap (--record-pcap feature)
 ├── speech.rs        # Whisper transcription + phrase matching
-└── notify.rs        # voip.ms SMS API integration
+└── notify.rs        # voip.ms SMS API integration with circuit breaker
 ```
 
 ## Key Data Flow
@@ -70,6 +77,6 @@ Copy `.env.example` to `.env` and configure:
 
 ## Notes
 
-- Audio resampling uses simple linear interpolation (8kHz → 16kHz)
+- Audio resampling uses Rubato FFT-based resampling (8kHz → 16kHz)
 - Fuzzy phrase matching allows 1 Levenshtein distance per word
-- SIP password is loaded but authentication not yet implemented (voip.ms may not require it for some configurations)
+- SIP digest authentication (RFC 2617/7616) is supported - set SIP_PASSWORD for providers that require it

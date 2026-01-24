@@ -1,6 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::env;
+use std::net::ToSocketAddrs;
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -28,6 +30,17 @@ pub struct Config {
 
     // Whisper model path (GGML format, e.g., ggml-base.en.bin)
     pub whisper_model_path: String,
+
+    // STUN server for NAT traversal (optional)
+    pub stun_server: Option<String>,
+
+    // Minimum audio duration in milliseconds to consider "audio received"
+    // Default: 500ms (catches brief noise vs actual greeting)
+    pub min_audio_duration_ms: u64,
+
+    // Health check HTTP server port (optional, disabled if not set)
+    // When set, exposes /health, /ready, and /metrics endpoints
+    pub health_port: Option<u16>,
 }
 
 impl Config {
@@ -67,6 +80,14 @@ impl Config {
 
             whisper_model_path: get("WHISPER_MODEL_PATH")
                 .unwrap_or_else(|| "./models/ggml-base.en.bin".to_string()),
+
+            stun_server: get("STUN_SERVER").filter(|s| !s.is_empty()),
+
+            min_audio_duration_ms: get("MIN_AUDIO_DURATION_MS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(500),
+
+            health_port: get("HEALTH_PORT").and_then(|s| s.parse().ok()),
         })
     }
 
@@ -74,6 +95,97 @@ impl Config {
     #[cfg(test)]
     pub fn from_map(map: &HashMap<&str, &str>) -> Result<Self> {
         Self::from_getter(|key| map.get(key).map(|v| v.to_string()))
+    }
+
+    /// Validate configuration values at startup.
+    /// Returns Ok(()) if all validations pass, or Err with details of what failed.
+    pub fn validate(&self) -> Result<()> {
+        let mut errors: Vec<String> = Vec::new();
+
+        // Validate Whisper model path exists
+        if !Path::new(&self.whisper_model_path).exists() {
+            errors.push(format!(
+                "Whisper model not found at '{}'. Download from HuggingFace.",
+                self.whisper_model_path
+            ));
+        }
+
+        // Validate SIP server can be resolved
+        let sip_addr = format!("{}:{}", self.sip_server, self.sip_port);
+        if sip_addr.to_socket_addrs().is_err() {
+            errors.push(format!(
+                "Cannot resolve SIP server '{}'. Check DNS or network.",
+                self.sip_server
+            ));
+        }
+
+        // Validate phone number formats (NANPA: 10 digits)
+        if !Self::is_valid_phone_number(&self.target_phone) {
+            errors.push(format!(
+                "TARGET_PHONE '{}' invalid. Expected 10-digit NANPA or E.164 format.",
+                self.target_phone
+            ));
+        }
+
+        if !Self::is_valid_phone_number(&self.alert_phone) {
+            errors.push(format!(
+                "ALERT_PHONE '{}' invalid. Expected 10-digit NANPA or E.164 format.",
+                self.alert_phone
+            ));
+        }
+
+        if !Self::is_valid_phone_number(&self.voipms_sms_did) {
+            errors.push(format!(
+                "VOIPMS_SMS_DID '{}' invalid. Expected 10-digit NANPA format.",
+                self.voipms_sms_did
+            ));
+        }
+
+        // Validate expected phrase is not empty
+        if self.expected_phrase.trim().is_empty() {
+            errors.push("EXPECTED_PHRASE cannot be empty.".to_string());
+        }
+
+        // Validate listen duration is reasonable
+        if self.listen_duration_secs == 0 {
+            errors.push("LISTEN_DURATION_SECS must be greater than 0.".to_string());
+        } else if self.listen_duration_secs > 300 {
+            errors.push(format!(
+                "LISTEN_DURATION_SECS={} seems too long (max recommended: 300).",
+                self.listen_duration_secs
+            ));
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!(
+                "Configuration validation failed:\n  - {}",
+                errors.join("\n  - ")
+            )
+        }
+    }
+
+    /// Check if a phone number is valid (NANPA 10-digit or E.164 format)
+    fn is_valid_phone_number(phone: &str) -> bool {
+        let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
+
+        // NANPA: exactly 10 digits
+        if digits.len() == 10 {
+            return true;
+        }
+
+        // E.164 with country code: 11 digits starting with 1 (North America)
+        if digits.len() == 11 && digits.starts_with('1') {
+            return true;
+        }
+
+        // E.164 format with + prefix
+        if phone.starts_with('+') && digits.len() >= 10 && digits.len() <= 15 {
+            return true;
+        }
+
+        false
     }
 }
 
@@ -223,6 +335,72 @@ mod tests {
         env.insert("SIP_PORT", "0");
         let config = Config::from_map(&env).expect("port 0 should be valid");
         assert_eq!(config.sip_port, 0);
+    }
+
+    #[test]
+    fn test_phone_number_validation_nanpa() {
+        assert!(Config::is_valid_phone_number("5551234567"));
+        assert!(Config::is_valid_phone_number("555-123-4567")); // with dashes
+        assert!(Config::is_valid_phone_number("(555) 123-4567")); // formatted
+    }
+
+    #[test]
+    fn test_phone_number_validation_e164() {
+        assert!(Config::is_valid_phone_number("+15551234567"));
+        assert!(Config::is_valid_phone_number("+1 555 123 4567")); // with spaces
+        assert!(Config::is_valid_phone_number("15551234567")); // 11 digits with country code
+    }
+
+    #[test]
+    fn test_phone_number_validation_invalid() {
+        assert!(!Config::is_valid_phone_number("555")); // too short
+        assert!(!Config::is_valid_phone_number("12345")); // too short
+        assert!(!Config::is_valid_phone_number("")); // empty
+        assert!(!Config::is_valid_phone_number("abcdefghij")); // non-numeric
+    }
+
+    #[test]
+    fn test_validation_empty_expected_phrase() {
+        let mut env = minimal_valid_env();
+        env.insert("EXPECTED_PHRASE", "   ");
+        let config = Config::from_map(&env).expect("should parse");
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("EXPECTED_PHRASE"), "error should mention empty phrase: {}", err);
+    }
+
+    #[test]
+    fn test_validation_zero_listen_duration() {
+        let mut env = minimal_valid_env();
+        env.insert("LISTEN_DURATION_SECS", "0");
+        let config = Config::from_map(&env).expect("should parse");
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("LISTEN_DURATION_SECS"), "error should mention duration: {}", err);
+    }
+
+    #[test]
+    fn test_validation_excessive_listen_duration() {
+        let mut env = minimal_valid_env();
+        env.insert("LISTEN_DURATION_SECS", "500");
+        let config = Config::from_map(&env).expect("should parse");
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("too long"), "error should mention duration too long: {}", err);
+    }
+
+    #[test]
+    fn test_validation_invalid_target_phone() {
+        let mut env = minimal_valid_env();
+        env.insert("TARGET_PHONE", "123"); // invalid
+        let config = Config::from_map(&env).expect("should parse");
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("TARGET_PHONE"), "error should mention invalid phone: {}", err);
     }
 }
 

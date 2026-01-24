@@ -1,10 +1,13 @@
 use anyhow::{Context, Result};
+use rubato::{FftFixedIn, Resampler};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
-use tracing::{debug, trace, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, trace, warn};
 
 use super::g711::{G711Codec, G711Decoder};
+use super::jitter::{BufferedPacket, JitterBuffer, JitterBufferConfig};
 
 /// RTP packet header (simplified)
 #[derive(Debug)]
@@ -19,6 +22,7 @@ pub struct RtpReceiver {
     socket: UdpSocket,
     decoder: Option<G711Decoder>,
     samples: Vec<i16>,
+    jitter_buffer: JitterBuffer,
 }
 
 impl RtpReceiver {
@@ -34,6 +38,7 @@ impl RtpReceiver {
             socket,
             decoder: None,
             samples: Vec::new(),
+            jitter_buffer: JitterBuffer::new(JitterBufferConfig::default()),
         })
     }
 
@@ -43,33 +48,71 @@ impl RtpReceiver {
 
     /// Receive RTP packets for the specified duration
     pub async fn receive_for(&mut self, duration: Duration) -> Result<()> {
+        // No cancellation - create a dummy token that never cancels
+        let cancel_token = CancellationToken::new();
+        self.receive_for_cancellable(duration, cancel_token)
+            .await
+            .map(|_| ()) // Discard the bool, just return success
+    }
+
+    /// Receive RTP packets for the specified duration with cancellation support
+    /// Returns Ok(true) if completed normally, Ok(false) if cancelled early
+    pub async fn receive_for_cancellable(
+        &mut self,
+        duration: Duration,
+        cancel_token: CancellationToken,
+    ) -> Result<bool> {
         let mut buf = [0u8; 2048];
         let deadline = tokio::time::Instant::now() + duration;
+        let mut cancelled = false;
 
         loop {
+            // Check for cancellation first
+            if cancel_token.is_cancelled() {
+                debug!("RTP receive cancelled by shutdown signal");
+                cancelled = true;
+                break;
+            }
+
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 break;
             }
 
-            match timeout(remaining, self.socket.recv_from(&mut buf)).await {
-                Ok(Ok((len, _addr))) => {
-                    if len >= 12 {
-                        self.process_packet(&buf[..len]);
+            // Use select to allow cancellation during receive
+            tokio::select! {
+                result = timeout(remaining.min(Duration::from_millis(100)), self.socket.recv_from(&mut buf)) => {
+                    match result {
+                        Ok(Ok((len, _addr))) => {
+                            if len >= 12 {
+                                self.process_packet(&buf[..len]);
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            warn!("RTP receive error: {}", e);
+                        }
+                        Err(_) => {
+                            // Short timeout - check for cancellation and continue
+                        }
                     }
                 }
-                Ok(Err(e)) => {
-                    warn!("RTP receive error: {}", e);
-                }
-                Err(_) => {
-                    // Timeout - we're done
+                _ = cancel_token.cancelled() => {
+                    debug!("RTP receive cancelled by shutdown signal");
+                    cancelled = true;
                     break;
                 }
             }
         }
 
-        debug!("Received {} audio samples", self.samples.len());
-        Ok(())
+        // Flush remaining packets from jitter buffer
+        self.flush_jitter_buffer();
+
+        debug!(
+            "Received {} audio samples{}",
+            self.samples.len(),
+            if cancelled { " (cancelled early)" } else { "" }
+        );
+        Ok(!cancelled)
     }
 
     fn process_packet(&mut self, data: &[u8]) {
@@ -121,9 +164,41 @@ impl RtpReceiver {
 
         let payload = &data[payload_start..];
 
-        if let Some(ref decoder) = self.decoder {
-            // Decode directly into samples buffer (avoids per-packet Vec allocation)
-            decoder.decode_into(payload, &mut self.samples);
+        // Buffer the packet in the jitter buffer
+        self.jitter_buffer.insert(BufferedPacket {
+            sequence: header.sequence,
+            timestamp: header.timestamp,
+            payload: payload.to_vec(),
+        });
+
+        // Process any ready packets from the buffer
+        self.process_buffered_packets();
+    }
+
+    /// Process packets from the jitter buffer that are ready for decoding
+    fn process_buffered_packets(&mut self) {
+        while let Some(packet) = self.jitter_buffer.pop() {
+            if let Some(ref decoder) = self.decoder {
+                decoder.decode_into(&packet.payload, &mut self.samples);
+            }
+        }
+    }
+
+    /// Flush remaining packets from the jitter buffer (call at end of receive)
+    fn flush_jitter_buffer(&mut self) {
+        for packet in self.jitter_buffer.drain() {
+            if let Some(ref decoder) = self.decoder {
+                decoder.decode_into(&packet.payload, &mut self.samples);
+            }
+        }
+
+        // Log jitter buffer stats
+        let stats = self.jitter_buffer.stats();
+        if stats.packets_received > 0 {
+            info!(
+                "Jitter buffer stats: received={}, output={}, dropped={}, lost={}",
+                stats.packets_received, stats.packets_output, stats.packets_dropped, stats.packets_lost
+            );
         }
     }
 
@@ -152,33 +227,82 @@ impl RtpReceiver {
 
     /// Get accumulated samples as f32 (for Whisper)
     /// Resamples from 8kHz (G.711) to 16kHz (Whisper expects 16kHz)
-    /// Fused operation: converts i16→f32 and resamples in a single pass
+    /// Uses high-quality FFT-based resampling via Rubato
     pub fn get_samples_f32(&self) -> Vec<f32> {
         if self.samples.is_empty() {
             return Vec::new();
         }
 
-        // Fused i16→f32 conversion with 8kHz→16kHz resampling in one allocation
-        let mut output = Vec::with_capacity(self.samples.len() * 2);
+        // Convert i16 to f32 first
+        let f32_samples: Vec<f32> = self.samples.iter().map(|&s| s as f32 / 32768.0).collect();
 
-        for i in 0..self.samples.len() {
-            let sample = self.samples[i] as f32 / 32768.0;
-            output.push(sample);
+        // Use high-quality FFT resampling
+        match resample_8k_to_16k_fft(&f32_samples) {
+            Ok(resampled) => resampled,
+            Err(e) => {
+                warn!("FFT resampling failed, falling back to linear: {}", e);
+                resample_8k_to_16k(&f32_samples)
+            }
+        }
+    }
+}
 
-            // Interpolate between this sample and the next
-            if i + 1 < self.samples.len() {
-                let next = self.samples[i + 1] as f32 / 32768.0;
-                output.push((sample + next) * 0.5);
-            } else {
-                // Last sample - duplicate
-                output.push(sample);
+/// High-quality FFT-based resampling from 8kHz to 16kHz using Rubato
+fn resample_8k_to_16k_fft(samples: &[f32]) -> Result<Vec<f32>> {
+    if samples.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Create resampler: 8000 Hz -> 16000 Hz (ratio = 2.0)
+    // chunk_size should be a reasonable size for processing
+    let chunk_size = 1024;
+    let mut resampler = FftFixedIn::<f32>::new(8000, 16000, chunk_size, 2, 1)
+        .context("Failed to create resampler")?;
+
+    let mut output = Vec::with_capacity(samples.len() * 2);
+
+    // Process in chunks
+    let mut pos = 0;
+    while pos < samples.len() {
+        let end = (pos + chunk_size).min(samples.len());
+        let chunk = &samples[pos..end];
+
+        // Rubato expects Vec<Vec<f32>> for multi-channel, we have mono
+        let input_frames = vec![chunk.to_vec()];
+
+        // For the last chunk, we may need to pad
+        if chunk.len() < chunk_size {
+            // Pad with zeros for the final chunk
+            let mut padded = chunk.to_vec();
+            padded.resize(chunk_size, 0.0);
+            let padded_input = vec![padded];
+
+            let resampled = resampler
+                .process(&padded_input, None)
+                .context("Failed to resample audio")?;
+
+            if !resampled.is_empty() && !resampled[0].is_empty() {
+                // Only take the proportion of samples we actually need
+                let expected_output = (chunk.len() as f64 * 2.0).ceil() as usize;
+                let take = expected_output.min(resampled[0].len());
+                output.extend_from_slice(&resampled[0][..take]);
+            }
+        } else {
+            let resampled = resampler
+                .process(&input_frames, None)
+                .context("Failed to resample audio")?;
+
+            if !resampled.is_empty() {
+                output.extend_from_slice(&resampled[0]);
             }
         }
 
-        output
+        pos = end;
     }
 
+    Ok(output)
 }
+
 
 /// Simple linear interpolation resampling from 8kHz to 16kHz (public for testing)
 pub fn resample_8k_to_16k(samples: &[f32]) -> Vec<f32> {
@@ -239,6 +363,66 @@ pub fn parse_rtp_header(data: &[u8]) -> Option<(u8, u16, u32, u32, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // === RTP receive cancellation tests ===
+
+    #[tokio::test]
+    async fn test_receive_for_cancellable_immediate_cancel() {
+        let mut receiver = RtpReceiver::bind(0).await.unwrap();
+        let cancel_token = CancellationToken::new();
+
+        // Cancel immediately
+        cancel_token.cancel();
+
+        // receive_for_cancellable should return quickly with cancelled=false (not completed)
+        let result = receiver
+            .receive_for_cancellable(Duration::from_secs(10), cancel_token)
+            .await;
+
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // Should return false (cancelled)
+    }
+
+    #[tokio::test]
+    async fn test_receive_for_cancellable_cancel_during_receive() {
+        let mut receiver = RtpReceiver::bind(0).await.unwrap();
+        let cancel_token = CancellationToken::new();
+        let cancel_token_clone = cancel_token.clone();
+
+        // Cancel after a short delay
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_token_clone.cancel();
+        });
+
+        // Start receiving with a long duration
+        let start = std::time::Instant::now();
+        let result = receiver
+            .receive_for_cancellable(Duration::from_secs(10), cancel_token)
+            .await;
+
+        let elapsed = start.elapsed();
+
+        // Should have returned early (not waited 10 seconds)
+        assert!(elapsed < Duration::from_secs(1));
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // Should return false (cancelled)
+    }
+
+    #[tokio::test]
+    async fn test_receive_for_cancellable_completes_normally() {
+        let mut receiver = RtpReceiver::bind(0).await.unwrap();
+        let cancel_token = CancellationToken::new();
+        // Don't cancel - let it complete normally
+
+        // Short duration so test is fast
+        let result = receiver
+            .receive_for_cancellable(Duration::from_millis(50), cancel_token)
+            .await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // Should return true (completed normally)
+    }
 
     // === resample_8k_to_16k tests ===
 

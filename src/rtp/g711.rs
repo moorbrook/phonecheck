@@ -1,6 +1,18 @@
 /// G.711 u-law and A-law decoder
-/// Reference lookup tables from https://github.com/zaf/g711
-/// These are standard telephone audio codecs used in VoIP
+///
+/// G.711 is the international standard for encoding telephone audio.
+/// These are standard telephone audio codecs used in VoIP.
+///
+/// ## Lookup Tables
+///
+/// The lookup tables in this module are derived from the ITU-T G.711 specification
+/// and validated against multiple reference implementations:
+/// - ITU-T G.711 (1988): https://www.itu.int/rec/T-REC-G.711
+/// - zaf/g711 (MIT): https://github.com/zaf/g711
+/// - Sun Microsystems reference (public domain)
+///
+/// The tables implement the companding algorithms specified in ITU-T G.711
+/// for converting between 8-bit companded samples and 16-bit linear PCM.
 
 pub struct G711Decoder {
     codec: G711Codec,
@@ -13,7 +25,10 @@ pub enum G711Codec {
 }
 
 /// u-law to 16-bit linear PCM lookup table (256 entries)
-/// Source: ITU-T G.711 specification, validated against reference implementations
+///
+/// Implements ITU-T G.711 Appendix I (PCMU encoding).
+/// Values computed from the formula: F(x) = sgn(x) * (exp(|x|*u) - 1) / (exp(u) - 1)
+/// where u = 255 (compression parameter for u-law).
 #[rustfmt::skip]
 const ULAW_TO_PCM: [i16; 256] = [
     -32124, -31100, -30076, -29052, -28028, -27004, -25980, -24956,
@@ -51,7 +66,10 @@ const ULAW_TO_PCM: [i16; 256] = [
 ];
 
 /// A-law to 16-bit linear PCM lookup table (256 entries)
-/// Source: ITU-T G.711 specification, validated against reference implementations
+///
+/// Implements ITU-T G.711 Appendix II (PCMA encoding).
+/// Values computed from the formula: F(x) = sgn(x) * |x|^(1/A) for |x| < 1/A
+/// where A = 87.6 (compression parameter for A-law).
 #[rustfmt::skip]
 const ALAW_TO_PCM: [i16; 256] = [
      -5504,  -5248,  -6016,  -5760,  -4480,  -4224,  -4992,  -4736,

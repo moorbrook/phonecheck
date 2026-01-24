@@ -24,6 +24,9 @@ pub fn generate_branch() -> String {
 }
 
 /// Build SIP INVITE request
+///
+/// If `external_addr` is provided (from STUN), use it for Contact header and SDP.
+/// Otherwise, use `local_addr`.
 pub fn build_invite(
     target_uri: &str,
     from_uri: &str,
@@ -33,14 +36,81 @@ pub fn build_invite(
     cseq: u32,
     local_addr: SocketAddr,
     rtp_port: u16,
+    external_rtp_addr: Option<SocketAddr>,
+) -> String {
+    build_invite_internal(
+        target_uri,
+        from_uri,
+        from_display,
+        call_id,
+        from_tag,
+        cseq,
+        local_addr,
+        rtp_port,
+        external_rtp_addr,
+        None,
+    )
+}
+
+/// Build SIP INVITE request with Authorization header for digest authentication
+pub fn build_invite_with_auth(
+    target_uri: &str,
+    from_uri: &str,
+    from_display: &str,
+    call_id: &str,
+    from_tag: &str,
+    cseq: u32,
+    local_addr: SocketAddr,
+    rtp_port: u16,
+    external_rtp_addr: Option<SocketAddr>,
+    authorization: &str,
+) -> String {
+    build_invite_internal(
+        target_uri,
+        from_uri,
+        from_display,
+        call_id,
+        from_tag,
+        cseq,
+        local_addr,
+        rtp_port,
+        external_rtp_addr,
+        Some(authorization),
+    )
+}
+
+/// Internal INVITE builder with optional authorization
+fn build_invite_internal(
+    target_uri: &str,
+    from_uri: &str,
+    from_display: &str,
+    call_id: &str,
+    from_tag: &str,
+    cseq: u32,
+    local_addr: SocketAddr,
+    rtp_port: u16,
+    external_rtp_addr: Option<SocketAddr>,
+    authorization: Option<&str>,
 ) -> String {
     let branch = generate_branch();
     let local_ip = local_addr.ip();
     let local_port = local_addr.port();
 
+    // Use external address for SDP if available (NAT traversal)
+    let (sdp_ip, sdp_rtp_port) = match external_rtp_addr {
+        Some(addr) => (addr.ip().to_string(), addr.port()),
+        None => (local_ip.to_string(), rtp_port),
+    };
+
     // SDP body for audio session
-    let sdp = build_sdp(local_ip.to_string().as_str(), rtp_port);
+    let sdp = build_sdp(&sdp_ip, sdp_rtp_port);
     let content_length = sdp.len();
+
+    // Build Authorization header if present
+    let auth_header = match authorization {
+        Some(auth) => format!("Authorization: {}\r\n", auth),
+        None => String::new(),
+    };
 
     format!(
         "INVITE {} SIP/2.0\r\n\
@@ -51,7 +121,7 @@ pub fn build_invite(
          Call-ID: {}\r\n\
          CSeq: {} INVITE\r\n\
          Contact: <sip:phonecheck@{}:{}>\r\n\
-         Content-Type: application/sdp\r\n\
+         {}Content-Type: application/sdp\r\n\
          Allow: INVITE, ACK, CANCEL, BYE\r\n\
          User-Agent: phonecheck/0.1.0\r\n\
          Content-Length: {}\r\n\
@@ -69,6 +139,7 @@ pub fn build_invite(
         cseq,
         local_ip,
         local_port,
+        auth_header,
         content_length,
         sdp
     )
@@ -368,6 +439,7 @@ mod tests {
             1,
             "192.168.1.1:5060".parse().unwrap(),
             10000,
+            None,
         );
 
         assert!(invite.starts_with("INVITE sip:1234@example.com SIP/2.0\r\n"));
@@ -379,6 +451,56 @@ mod tests {
         assert!(invite.contains("Content-Type: application/sdp"));
         assert!(invite.contains("m=audio"));
         assert!(invite.contains("a=rtpmap:0 PCMU/8000"));
+    }
+
+    #[test]
+    fn test_build_invite_with_external_addr() {
+        let invite = build_invite(
+            "sip:1234@example.com",
+            "sip:caller@example.com",
+            "Caller",
+            "callid123@host",
+            "fromtag",
+            1,
+            "192.168.1.1:5060".parse().unwrap(),
+            10000,
+            Some("203.0.113.50:10000".parse().unwrap()),
+        );
+
+        // SDP should contain the external IP, not the local IP
+        assert!(invite.contains("c=IN IP4 203.0.113.50"));
+        assert!(invite.contains("m=audio 10000"));
+        // Local IP should still be in Via header
+        assert!(invite.contains("Via: SIP/2.0/UDP 192.168.1.1:5060"));
+    }
+
+    #[test]
+    fn test_build_invite_with_auth_contains_authorization() {
+        let auth_header = r#"Digest username="user", realm="test", nonce="abc123", uri="sip:1234@example.com", response="xyz789""#;
+        let invite = build_invite_with_auth(
+            "sip:1234@example.com",
+            "sip:caller@example.com",
+            "Caller",
+            "callid123@host",
+            "fromtag",
+            2, // CSeq 2 for retry after 401
+            "192.168.1.1:5060".parse().unwrap(),
+            10000,
+            None,
+            auth_header,
+        );
+
+        assert!(invite.starts_with("INVITE sip:1234@example.com SIP/2.0\r\n"));
+        assert!(invite.contains("Authorization: Digest"));
+        assert!(invite.contains("CSeq: 2 INVITE"));
+        assert!(invite.contains("username=\"user\""));
+        assert!(invite.contains("realm=\"test\""));
+        // Should still have all other required headers
+        assert!(invite.contains("Via:"));
+        assert!(invite.contains("From:"));
+        assert!(invite.contains("To:"));
+        assert!(invite.contains("Call-ID:"));
+        assert!(invite.contains("Content-Type: application/sdp"));
     }
 
     #[test]
