@@ -820,20 +820,40 @@ mod kani_proofs {
         diff > 0 && diff < 0x8000
     }
 
-    /// Proves: is_before() correctly handles all u16 pairs including wraparound
-    /// For any a, b: exactly one of is_before(a,b), is_before(b,a), or a==b is true
+    /// Proves: is_before() correctly handles most u16 pairs
+    /// When diff != 0x8000 (the ambiguous midpoint), exactly one of
+    /// is_before(a,b), is_before(b,a), or a==b is true
     #[kani::proof]
     fn is_before_trichotomy() {
         let a: u16 = kani::any();
         let b: u16 = kani::any();
 
+        let diff = b.wrapping_sub(a);
+
+        // Skip the ambiguous midpoint case (diff == 0x8000)
+        // When exactly 32768 apart, neither direction is "before"
+        kani::assume(diff != 0x8000);
+
         let a_before_b = is_before(a, b);
         let b_before_a = is_before(b, a);
         let equal = a == b;
 
-        // Exactly one must be true (trichotomy)
+        // Exactly one must be true (trichotomy, excluding midpoint)
         let count = a_before_b as u8 + b_before_a as u8 + equal as u8;
         kani::assert(count == 1, "exactly one of <, >, or == must hold");
+    }
+
+    /// Proves: the midpoint case (diff == 0x8000) is ambiguous
+    /// Neither sequence is "before" the other
+    #[kani::proof]
+    fn is_before_midpoint_ambiguous() {
+        let a: u16 = kani::any();
+        let b: u16 = a.wrapping_add(0x8000); // Exactly 32768 apart
+
+        // Both directions return false - ordering is ambiguous
+        kani::assert(!is_before(a, b), "midpoint: a not before b");
+        kani::assert(!is_before(b, a), "midpoint: b not before a");
+        kani::assert(a != b, "midpoint values are not equal");
     }
 
     /// Proves: is_before() is anti-symmetric

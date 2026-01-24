@@ -56,9 +56,8 @@ def seqIsBefore (a b : UInt16) : Bool :=
 -- ============================================================================
 
 theorem len_nonneg (list : PacketList) : list.len ≥ 0 := by
-  induction list with
-  | nil => simp [PacketList.len]
-  | cons _ _ tail ih => simp [PacketList.len]; omega
+  -- Nat is always ≥ 0
+  exact Nat.zero_le _
 
 -- ============================================================================
 -- THEOREM 2: Insert increases length by exactly 1
@@ -67,6 +66,7 @@ theorem len_nonneg (list : PacketList) : list.len ≥ 0 := by
 theorem insert_len (list : PacketList) (seq : UInt16) (plen : UInt32) :
     (list.insert seq plen).len = list.len + 1 := by
   simp [PacketList.insert, PacketList.len]
+  omega
 
 -- ============================================================================
 -- THEOREM 3: Inserted sequence is in the list
@@ -144,17 +144,33 @@ theorem buffer_no_duplicates (list : PacketList) (h : noDuplicates list)
 -- THEOREM 8: Levenshtein distance properties
 -- ============================================================================
 
+/-- Levenshtein distance (simplified definition for proofs) -/
+def levenshtein_simple : List UInt8 → List UInt8 → Nat
+  | [], b => b.length
+  | a, [] => a.length
+  | a :: as, b :: bs =>
+    let cost := if a == b then 0 else 1
+    min (min (levenshtein_simple as (b :: bs) + 1)
+             (levenshtein_simple (a :: as) bs + 1))
+        (levenshtein_simple as bs + cost)
+
 /-- Levenshtein distance is symmetric -/
-axiom levenshtein_symmetric (a b : List UInt8) :
-  levenshtein_simple a b = levenshtein_simple b a
+theorem levenshtein_symmetric (a b : List UInt8) :
+    levenshtein_simple a b = levenshtein_simple b a := by
+  sorry  -- Requires structural induction
 
 /-- Levenshtein distance satisfies triangle inequality -/
-axiom levenshtein_triangle (a b c : List UInt8) :
-  levenshtein_simple a c ≤ levenshtein_simple a b + levenshtein_simple b c
+theorem levenshtein_triangle (a b c : List UInt8) :
+    levenshtein_simple a c ≤ levenshtein_simple a b + levenshtein_simple b c := by
+  sorry  -- Requires complex induction
 
 /-- Levenshtein of identical strings is 0 -/
 theorem levenshtein_identity (a : List UInt8) :
     levenshtein_simple a a = 0 := by
-  sorry  -- Requires induction on list structure
+  induction a with
+  | nil => simp [levenshtein_simple]
+  | cons x xs ih =>
+    simp only [levenshtein_simple]
+    simp [ih]
 
 end PhoneCheck
