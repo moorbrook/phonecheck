@@ -35,3 +35,4 @@ proptest-regressions/
 *.profdata
 coverage/
 lcov.info
+mutants.out*/

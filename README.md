@@ -1,0 +1,204 @@
+# PhoneCheck
+
+A PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, transcribes the audio greeting using Whisper, and sends SMS alerts if the expected phrase is not detected.
+
+## Use Case
+
+Monitor your business phone system to ensure callers hear the correct greeting. PhoneCheck will:
+
+1. Call your phone number every hour during business hours (8am-5pm Pacific)
+2. Listen to the greeting and transcribe it using Whisper AI
+3. Check if the expected phrase is present (fuzzy matching allows minor variations)
+4. Send you an SMS alert if something is wrong
+
+## Requirements
+
+- Rust 1.70+
+- CMake (for building whisper.cpp)
+- A [voip.ms](https://voip.ms) account with:
+  - A SIP sub-account for making calls
+  - SMS-enabled DID for sending alerts
+  - API access enabled
+
+## Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/phonecheck.git
+cd phonecheck
+
+# Build (requires cmake)
+cargo build --release
+
+# Download a Whisper model
+mkdir -p models
+curl -L -o models/ggml-base.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+```
+
+## Configuration
+
+Copy `.env.example` to `.env` and configure:
+
+```bash
+cp .env.example .env
+```
+
+### Required Settings
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `SIP_USERNAME` | voip.ms sub-account username | `mysubaccount` |
+| `SIP_PASSWORD` | voip.ms sub-account password | `secretpass` |
+| `SIP_SERVER` | voip.ms SIP server | `atlanta.voip.ms` |
+| `TARGET_PHONE` | Phone number to call | `19095551234` |
+| `EXPECTED_PHRASE` | Phrase to detect in greeting | `thank you for calling` |
+| `VOIPMS_API_USER` | voip.ms main account email | `you@email.com` |
+| `VOIPMS_API_PASS` | voip.ms API password | `apipassword` |
+| `VOIPMS_SMS_DID` | SMS-enabled DID | `19095559999` |
+| `ALERT_PHONE` | Your cell phone for alerts | `19095558888` |
+| `WHISPER_MODEL_PATH` | Path to Whisper model | `./models/ggml-base.en.bin` |
+
+### Optional Settings
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SIP_PORT` | SIP server port | `5060` |
+| `LISTEN_DURATION_SECS` | How long to listen (1-300) | `10` |
+| `MIN_AUDIO_DURATION_MS` | Minimum valid audio length | `500` |
+| `STUN_SERVER` | STUN server for NAT traversal | (disabled) |
+| `HEALTH_PORT` | HTTP health check port | (disabled) |
+| `RUST_LOG` | Log level | `info` |
+
+## Usage
+
+### Run as Daemon (Recommended)
+
+```bash
+# Runs hourly checks during business hours (8am-5pm Pacific)
+./target/release/phonecheck
+```
+
+### Run Single Check
+
+```bash
+# Run one check immediately and exit
+./target/release/phonecheck --once
+```
+
+### Validate Configuration
+
+```bash
+# Check that all settings are valid without making a call
+./target/release/phonecheck --validate
+```
+
+### Record RTP Packets (Debugging)
+
+```bash
+# Build with recording feature
+cargo build --release --features record
+
+# Record packets to pcap file
+./target/release/phonecheck --record-pcap call.pcap
+```
+
+### Command Line Options
+
+```
+USAGE: phonecheck [OPTIONS]
+
+OPTIONS:
+    --once              Run a single check and exit
+    --validate          Validate configuration and exit
+    --record-pcap FILE  Record RTP packets to pcap file (implies --once)
+    --help, -h          Show help message
+
+ENVIRONMENT:
+    See .env.example for required configuration variables
+```
+
+## Health Check Endpoint
+
+If `HEALTH_PORT` is set, an HTTP server exposes:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | JSON status of last check |
+| `GET /ready` | 200 if healthy, 503 if last check failed |
+| `GET /metrics` | Prometheus metrics |
+
+Example:
+```bash
+curl http://localhost:8080/health
+```
+
+## How It Works
+
+```
+┌─────────────┐    SIP INVITE    ┌─────────────┐    PSTN    ┌─────────────┐
+│ PhoneCheck  │ ───────────────► │  voip.ms    │ ─────────► │ Your Phone  │
+│             │ ◄─────────────── │  Server     │ ◄───────── │   System    │
+│             │    RTP Audio     │             │            │             │
+└─────────────┘                  └─────────────┘            └─────────────┘
+       │
+       │ G.711 decode → Resample → Whisper transcribe
+       │
+       ▼
+┌─────────────┐
+│ "Thank you  │──── Fuzzy match ────► Expected phrase found?
+│ for calling │                              │
+│ Acme Corp"  │                     ┌────────┴────────┐
+└─────────────┘                     │                 │
+                                   YES               NO
+                                    │                 │
+                                    ▼                 ▼
+                               (no action)      Send SMS Alert
+```
+
+## Phrase Matching
+
+PhoneCheck uses fuzzy matching to handle minor transcription errors:
+
+- Case insensitive
+- Allows 1 character difference per word (for words > 3 characters)
+- Words must appear in order
+
+Examples that match `"thank you for calling"`:
+- `"Thank you for calling"` (case difference)
+- `"thanks you for calling"` (1 char difference in "thank")
+- `"thank you for calling Acme Corp"` (extra words OK)
+
+## Logging
+
+Control log verbosity with `RUST_LOG`:
+
+```bash
+RUST_LOG=debug ./target/release/phonecheck --once  # Verbose
+RUST_LOG=warn ./target/release/phonecheck          # Quiet
+```
+
+## Troubleshooting
+
+### "No audio received"
+- Check that your SIP credentials are correct
+- Verify the target phone number answers (not voicemail)
+- Try increasing `LISTEN_DURATION_SECS`
+
+### "Phrase not found" but greeting is correct
+- Check the Whisper transcription in debug logs
+- Try a larger Whisper model (`ggml-small.en.bin`)
+- Adjust `EXPECTED_PHRASE` to match what Whisper hears
+
+### NAT/Firewall issues
+- Set `STUN_SERVER=stun.l.google.com:19302`
+- Ensure UDP ports 10000-20000 are open for RTP
+
+### SMS alerts not sending
+- Verify `VOIPMS_API_USER` and `VOIPMS_API_PASS`
+- Check that `VOIPMS_SMS_DID` has SMS enabled
+- Ensure API access is enabled in voip.ms portal
+
+## License
+
+MIT
