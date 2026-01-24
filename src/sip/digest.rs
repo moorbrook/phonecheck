@@ -564,3 +564,82 @@ mod proptests {
         }
     }
 }
+
+/// Kani formal verification proofs
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Proves: parse_params never panics on any input
+    #[kani::proof]
+    fn parse_params_never_panics() {
+        let bytes: [u8; 32] = kani::any();
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            let _ = parse_params(s);
+        }
+    }
+
+    /// Proves: DigestChallenge::parse never panics on any input
+    #[kani::proof]
+    fn parse_challenge_never_panics() {
+        let bytes: [u8; 64] = kani::any();
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            let _ = DigestChallenge::parse(s);
+        }
+    }
+
+    /// Proves: extract_authenticate_header never panics on any input
+    #[kani::proof]
+    fn extract_auth_header_never_panics() {
+        let bytes: [u8; 128] = kani::any();
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            let _ = extract_authenticate_header(s);
+        }
+    }
+
+    /// Proves: md5_hex output is always exactly 32 characters
+    #[kani::proof]
+    fn md5_output_length() {
+        let bytes: [u8; 16] = kani::any();
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            let hash = md5_hex(s);
+            kani::assert(hash.len() == 32, "MD5 hash must be 32 hex chars");
+        }
+    }
+
+    /// Proves: md5_hex output contains only valid hex characters
+    #[kani::proof]
+    fn md5_output_is_hex() {
+        let bytes: [u8; 8] = kani::any();
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            let hash = md5_hex(s);
+            for c in hash.chars() {
+                kani::assert(
+                    c.is_ascii_hexdigit() && c.is_ascii_lowercase(),
+                    "MD5 hash must be lowercase hex"
+                );
+            }
+        }
+    }
+
+    /// Proves: hex::encode produces correct length output (2 chars per byte)
+    #[kani::proof]
+    fn hex_encode_length() {
+        let bytes: [u8; 8] = kani::any();
+        let encoded = hex::encode(&bytes);
+        kani::assert(
+            encoded.len() == bytes.len() * 2,
+            "hex encode must produce 2 chars per byte"
+        );
+    }
+
+    /// Proves: DigestAlgorithm default is Md5
+    #[kani::proof]
+    fn default_algorithm_is_md5() {
+        let algo = DigestAlgorithm::default();
+        kani::assert(
+            algo == DigestAlgorithm::Md5,
+            "default algorithm must be MD5"
+        );
+    }
+}

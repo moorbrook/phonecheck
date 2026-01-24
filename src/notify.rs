@@ -19,7 +19,7 @@ pub const CIRCUIT_FAILURE_THRESHOLD: u32 = 3;
 pub const CIRCUIT_OPEN_DURATION: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Circuit breaker state
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CircuitState {
     /// Normal operation - requests allowed
     Closed,
@@ -847,5 +847,283 @@ mod kani_proofs {
                 "backoff should be at most 4 seconds for MAX_RETRIES=3"
             );
         }
+    }
+
+    /// Proves: truncate_sms_message output never exceeds MAX_SMS_LENGTH
+    #[kani::proof]
+    fn truncate_output_bounded() {
+        let bytes: [u8; 200] = kani::any();
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            let result = truncate_sms_message(s);
+            kani::assert(
+                result.len() <= MAX_SMS_LENGTH,
+                "truncated message must not exceed MAX_SMS_LENGTH"
+            );
+        }
+    }
+
+    /// Proves: truncate_sms_message never panics on any valid UTF-8 input
+    #[kani::proof]
+    fn truncate_never_panics() {
+        let bytes: [u8; 64] = kani::any();
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            let _ = truncate_sms_message(s);
+        }
+    }
+
+    /// Proves: short messages are not modified
+    #[kani::proof]
+    fn truncate_preserves_short() {
+        let bytes: [u8; 50] = kani::any();
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            if s.len() <= MAX_SMS_LENGTH {
+                let result = truncate_sms_message(s);
+                kani::assert(
+                    result == s,
+                    "short messages should not be modified"
+                );
+            }
+        }
+    }
+
+    /// Proves: truncate_sms_message output is valid UTF-8
+    /// (implicitly verified since String guarantees UTF-8)
+    #[kani::proof]
+    fn truncate_output_valid_utf8() {
+        let bytes: [u8; 32] = kani::any();
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            let result = truncate_sms_message(s);
+            // If we get here without panic, result is valid UTF-8
+            // (Rust's String type guarantees this)
+            kani::assert(!result.is_empty() || s.is_empty(), "result should be non-empty for non-empty input");
+        }
+    }
+}
+
+/// Stateright model for circuit breaker state machine
+#[cfg(test)]
+mod circuit_breaker_model {
+    use super::*;
+    use stateright::*;
+
+    /// Circuit breaker actions
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    enum Action {
+        /// A request succeeds
+        Success,
+        /// A request fails
+        Failure,
+        /// Time passes (simulates timeout)
+        TimePasses,
+    }
+
+    /// Circuit breaker state for model checking
+    /// Simplified to keep state space manageable
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    struct CBState {
+        state: CircuitState,
+        consecutive_failures: u8, // Use u8 to limit state space
+        timeout_elapsed: bool,    // Simplified: just track if timeout happened
+        total_actions: u8,        // Bound exploration
+    }
+
+    impl CBState {
+        fn new() -> Self {
+            Self {
+                state: CircuitState::Closed,
+                consecutive_failures: 0,
+                timeout_elapsed: false,
+                total_actions: 0,
+            }
+        }
+    }
+
+    struct CircuitBreakerModel {
+        failure_threshold: u8,
+        max_actions: u8,
+    }
+
+    impl Model for CircuitBreakerModel {
+        type State = CBState;
+        type Action = Action;
+
+        fn init_states(&self) -> Vec<Self::State> {
+            vec![CBState::new()]
+        }
+
+        fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
+            // Limit total exploration
+            if state.total_actions >= self.max_actions {
+                return;
+            }
+
+            // Only allow actions that make sense in current state
+            match state.state {
+                CircuitState::Closed => {
+                    actions.push(Action::Success);
+                    actions.push(Action::Failure);
+                }
+                CircuitState::Open => {
+                    if !state.timeout_elapsed {
+                        actions.push(Action::TimePasses);
+                    }
+                }
+                CircuitState::HalfOpen => {
+                    actions.push(Action::Success);
+                    actions.push(Action::Failure);
+                }
+            }
+        }
+
+        fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
+            let mut next = state.clone();
+            next.total_actions += 1;
+
+            match action {
+                Action::Success => {
+                    match state.state {
+                        CircuitState::Closed => {
+                            next.consecutive_failures = 0;
+                        }
+                        CircuitState::HalfOpen => {
+                            next.state = CircuitState::Closed;
+                            next.consecutive_failures = 0;
+                            next.timeout_elapsed = false;
+                        }
+                        CircuitState::Open => {
+                            // Blocked - no change
+                        }
+                    }
+                }
+
+                Action::Failure => {
+                    match state.state {
+                        CircuitState::Closed => {
+                            next.consecutive_failures = next.consecutive_failures.saturating_add(1);
+                            if next.consecutive_failures >= self.failure_threshold {
+                                next.state = CircuitState::Open;
+                                next.timeout_elapsed = false;
+                            }
+                        }
+                        CircuitState::HalfOpen => {
+                            next.state = CircuitState::Open;
+                            next.consecutive_failures = next.consecutive_failures.saturating_add(1);
+                            next.timeout_elapsed = false;
+                        }
+                        CircuitState::Open => {}
+                    }
+                }
+
+                Action::TimePasses => {
+                    if state.state == CircuitState::Open && !state.timeout_elapsed {
+                        next.timeout_elapsed = true;
+                        next.state = CircuitState::HalfOpen;
+                    }
+                }
+            }
+
+            Some(next)
+        }
+
+        fn properties(&self) -> Vec<Property<Self>> {
+            vec![
+                // Safety: In Open state, failures >= threshold
+                Property::always("open_requires_failures", |model: &Self, state: &CBState| {
+                    if state.state == CircuitState::Open {
+                        state.consecutive_failures >= model.failure_threshold
+                    } else {
+                        true
+                    }
+                }),
+
+                // Safety: HalfOpen requires timeout
+                Property::always("halfopen_requires_timeout", |_: &Self, state: &CBState| {
+                    if state.state == CircuitState::HalfOpen {
+                        state.timeout_elapsed
+                    } else {
+                        true
+                    }
+                }),
+
+                // Safety: Closed state means no timeout flag
+                Property::always("closed_no_timeout", |_: &Self, state: &CBState| {
+                    if state.state == CircuitState::Closed {
+                        !state.timeout_elapsed
+                    } else {
+                        true
+                    }
+                }),
+
+                // Liveness: Can reach recovered state
+                Property::sometimes("can_recover", |_: &Self, state: &CBState| {
+                    state.state == CircuitState::Closed
+                }),
+            ]
+        }
+    }
+
+    #[test]
+    fn test_circuit_breaker_model() {
+        let model = CircuitBreakerModel {
+            failure_threshold: 2,
+            max_actions: 6,
+        };
+        let checker = model.checker().threads(1).spawn_bfs().join();
+        println!("Circuit breaker states explored: {}", checker.unique_state_count());
+        checker.assert_properties();
+    }
+
+    #[test]
+    fn test_circuit_breaker_all_transitions() {
+        // Test specific state transitions manually
+        let model = CircuitBreakerModel {
+            failure_threshold: 2,
+            max_actions: 10,
+        };
+
+        let mut state = CBState::new();
+        assert_eq!(state.state, CircuitState::Closed);
+
+        // Fail twice to open circuit
+        state = model.next_state(&state, Action::Failure).unwrap();
+        assert_eq!(state.state, CircuitState::Closed);
+        assert_eq!(state.consecutive_failures, 1);
+
+        state = model.next_state(&state, Action::Failure).unwrap();
+        assert_eq!(state.state, CircuitState::Open);
+        assert_eq!(state.consecutive_failures, 2);
+
+        // Wait for timeout
+        state = model.next_state(&state, Action::TimePasses).unwrap();
+        assert_eq!(state.state, CircuitState::HalfOpen);
+        assert!(state.timeout_elapsed);
+
+        // Success recovers
+        state = model.next_state(&state, Action::Success).unwrap();
+        assert_eq!(state.state, CircuitState::Closed);
+        assert_eq!(state.consecutive_failures, 0);
+        assert!(!state.timeout_elapsed);
+    }
+
+    #[test]
+    fn test_circuit_breaker_halfopen_failure() {
+        let model = CircuitBreakerModel {
+            failure_threshold: 2,
+            max_actions: 10,
+        };
+
+        // Get to HalfOpen
+        let mut state = CBState::new();
+        state = model.next_state(&state, Action::Failure).unwrap();
+        state = model.next_state(&state, Action::Failure).unwrap();
+        assert_eq!(state.state, CircuitState::Open);
+
+        state = model.next_state(&state, Action::TimePasses).unwrap();
+        assert_eq!(state.state, CircuitState::HalfOpen);
+
+        // Failure in HalfOpen goes back to Open
+        state = model.next_state(&state, Action::Failure).unwrap();
+        assert_eq!(state.state, CircuitState::Open);
+        assert!(!state.timeout_elapsed); // timeout reset
     }
 }
