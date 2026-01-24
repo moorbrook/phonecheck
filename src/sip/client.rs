@@ -14,8 +14,8 @@ use tracing::{debug, info, warn};
 
 use super::digest::{extract_authenticate_header, DigestChallenge, DigestResponse};
 use super::messages::{
-    build_ack, build_bye, build_invite, build_invite_with_auth, extract_to_tag,
-    extract_via_branch, generate_call_id, generate_tag, parse_status_code,
+    build_ack, build_bye, build_invite, build_invite_with_auth, extract_rtp_address,
+    extract_to_tag, extract_via_branch, generate_call_id, generate_tag, parse_status_code,
 };
 use super::transport::SipTransport;
 use crate::config::Config;
@@ -403,6 +403,16 @@ impl SipClient {
         );
         transport.send(&ack).await?;
         info!("Call connected, listening for audio...");
+
+        // Extract remote RTP address from SDP and punch through NAT
+        if let Some(remote_rtp_addr) = extract_rtp_address(&response) {
+            debug!("Remote RTP endpoint: {}", remote_rtp_addr);
+            if let Err(e) = rtp_receiver.punch_nat(remote_rtp_addr).await {
+                warn!("NAT hole-punch failed: {}", e);
+            }
+        } else {
+            warn!("Could not extract remote RTP address from SDP");
+        }
 
         // Receive RTP audio for specified duration (with cancellation support)
         let completed_normally = rtp_receiver

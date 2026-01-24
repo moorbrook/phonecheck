@@ -301,6 +301,47 @@ pub fn extract_via_branch(response: &str) -> Option<String> {
     None
 }
 
+/// Extract remote RTP address from SDP in SIP response
+/// Parses c= (connection) and m= (media) lines to get IP and port
+pub fn extract_rtp_address(response: &str) -> Option<std::net::SocketAddr> {
+    // Find SDP body (after empty line)
+    let sdp_start = response.find("\r\n\r\n").map(|i| i + 4)
+        .or_else(|| response.find("\n\n").map(|i| i + 2))?;
+    let sdp = &response[sdp_start..];
+
+    let mut connection_ip: Option<std::net::IpAddr> = None;
+    let mut audio_port: Option<u16> = None;
+
+    for line in sdp.lines() {
+        let line = line.trim();
+
+        // Parse c=IN IP4 <address> or c=IN IP6 <address>
+        if line.starts_with("c=IN IP4 ") || line.starts_with("c=IN IP6 ") {
+            let addr_str = &line[9..];
+            // Address may have additional parameters after space
+            let addr_end = addr_str.find(' ').unwrap_or(addr_str.len());
+            if let Ok(ip) = addr_str[..addr_end].parse() {
+                connection_ip = Some(ip);
+            }
+        }
+
+        // Parse m=audio <port> RTP/AVP ...
+        if line.starts_with("m=audio ") {
+            let rest = &line[8..];
+            if let Some(port_end) = rest.find(' ') {
+                if let Ok(port) = rest[..port_end].parse() {
+                    audio_port = Some(port);
+                }
+            }
+        }
+    }
+
+    match (connection_ip, audio_port) {
+        (Some(ip), Some(port)) => Some(std::net::SocketAddr::new(ip, port)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,6 +609,63 @@ mod tests {
         // To header should not have tag
         assert!(ack.contains("To: <sip:1234@example.com>\r\n"));
         assert!(!ack.contains("To: <sip:1234@example.com>;tag="));
+    }
+
+    #[test]
+    fn test_extract_rtp_address_basic() {
+        let response = "SIP/2.0 200 OK\r\n\
+                        Content-Type: application/sdp\r\n\
+                        \r\n\
+                        v=0\r\n\
+                        o=- 123 456 IN IP4 192.168.1.100\r\n\
+                        s=Session\r\n\
+                        c=IN IP4 192.168.1.100\r\n\
+                        t=0 0\r\n\
+                        m=audio 16384 RTP/AVP 0 8\r\n\
+                        a=rtpmap:0 PCMU/8000\r\n";
+
+        let addr = extract_rtp_address(response);
+        assert!(addr.is_some());
+        let addr = addr.unwrap();
+        assert_eq!(addr.ip().to_string(), "192.168.1.100");
+        assert_eq!(addr.port(), 16384);
+    }
+
+    #[test]
+    fn test_extract_rtp_address_ipv6() {
+        let response = "SIP/2.0 200 OK\r\n\r\n\
+                        v=0\r\n\
+                        c=IN IP6 ::1\r\n\
+                        m=audio 5004 RTP/AVP 0\r\n";
+
+        let addr = extract_rtp_address(response);
+        assert!(addr.is_some());
+        let addr = addr.unwrap();
+        assert!(addr.ip().is_ipv6());
+        assert_eq!(addr.port(), 5004);
+    }
+
+    #[test]
+    fn test_extract_rtp_address_no_sdp() {
+        let response = "SIP/2.0 200 OK\r\n\r\n";
+        assert!(extract_rtp_address(response).is_none());
+    }
+
+    #[test]
+    fn test_extract_rtp_address_no_audio() {
+        let response = "SIP/2.0 200 OK\r\n\r\n\
+                        v=0\r\n\
+                        c=IN IP4 192.168.1.100\r\n\
+                        m=video 5000 RTP/AVP 96\r\n";
+        assert!(extract_rtp_address(response).is_none());
+    }
+
+    #[test]
+    fn test_extract_rtp_address_no_connection() {
+        let response = "SIP/2.0 200 OK\r\n\r\n\
+                        v=0\r\n\
+                        m=audio 5000 RTP/AVP 0\r\n";
+        assert!(extract_rtp_address(response).is_none());
     }
 }
 

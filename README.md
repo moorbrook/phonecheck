@@ -36,6 +36,46 @@ curl -L -o models/ggml-base.en.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 ```
 
+## voip.ms Setup
+
+PhoneCheck requires a [voip.ms](https://voip.ms) account. You'll need to configure three things:
+
+### 1. Create a SIP Sub-Account (for making calls)
+
+1. Log in to [voip.ms portal](https://voip.ms)
+2. Go to **Main Menu → Sub Accounts → Create Sub Account**
+3. Choose a username and password
+4. Note the assigned SIP server (e.g., `atlanta.voip.ms`)
+5. Set **CallerID** to a DID you own (required for outbound calls)
+
+### 2. Enable the REST API (for sending SMS alerts)
+
+1. Go to **Main Menu → SOAP and REST/JSON API** ([direct link](https://voip.ms/m/api.php))
+2. Click **Enable API** if not already enabled
+3. Set an **API Password** (different from your login password) and click **Save API Password**
+4. Under **IP Addresses**, either:
+   - Add your server's IP address, OR
+   - Enter `0.0.0.0` to allow access from any IP (less secure)
+5. Click **Save IP Addresses**
+
+Your API credentials are:
+- **Username**: Your voip.ms account email
+- **Password**: The API password you just set (not your login password)
+
+See [voip.ms API documentation](https://voip.ms/resources/api) for more details.
+
+### 3. Enable SMS on a DID (for sending alerts)
+
+1. Go to **DID Numbers → Manage DIDs**
+2. Click the **Edit** (pencil icon) button for the DID you want to use
+3. Scroll to **SMS/MMS Configuration** section
+4. Check **Enable SMS/MMS Service**
+5. Click **Apply Changes**
+
+Note: US business SMS requires [10DLC registration](https://wiki.voip.ms/article/SMS-MMS). Unregistered traffic may be filtered or incur additional fees.
+
+See [voip.ms SMS/MMS documentation](https://wiki.voip.ms/article/SMS-MMS) for more details.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and configure:

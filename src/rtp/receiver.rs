@@ -57,6 +57,43 @@ impl RtpReceiver {
         Ok(self.socket.local_addr()?.port())
     }
 
+    /// Send empty RTP packets to punch through NAT
+    /// This creates a mapping in the NAT table so return traffic can reach us
+    pub async fn punch_nat(&self, remote_addr: std::net::SocketAddr) -> Result<()> {
+        use tracing::info;
+
+        info!("Sending NAT hole-punch packets to {}", remote_addr);
+
+        // Build minimal RTP packets (just header, no payload)
+        // Version 2, no padding, no extension, no CSRC, PT=0 (PCMU)
+        let mut packet = [0u8; 12];
+        packet[0] = 0x80; // V=2, P=0, X=0, CC=0
+        packet[1] = 0x00; // M=0, PT=0
+
+        // Send a few packets to ensure the NAT mapping is created
+        // Some NATs need multiple packets, and timing can matter
+        for i in 0..5 {
+            // Update sequence number
+            packet[2] = 0;
+            packet[3] = i;
+
+            // Update timestamp
+            let ts = (i as u32) * 160; // 20ms @ 8kHz
+            packet[4..8].copy_from_slice(&ts.to_be_bytes());
+
+            // SSRC can be random/fixed
+            packet[8..12].copy_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+
+            self.socket.send_to(&packet, remote_addr).await?;
+
+            // Small delay between packets
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        info!("NAT hole-punch complete");
+        Ok(())
+    }
+
     /// Receive RTP packets for the specified duration
     pub async fn receive_for(&mut self, duration: Duration) -> Result<()> {
         // No cancellation - create a dummy token that never cancels

@@ -36,3 +36,4 @@ proptest-regressions/
 coverage/
 lcov.info
 mutants.out*/
+models/

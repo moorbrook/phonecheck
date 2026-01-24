@@ -100,6 +100,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Load .env file if present
+    let _ = dotenvy::dotenv();
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
