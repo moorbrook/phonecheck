@@ -1,0 +1,16 @@
+[package]
+name = "phonecheck-verus"
+version = "0.1.0"
+edition = "2021"
+
+# This crate is for Verus verification only.
+# To verify:
+#   1. Install Verus: https://github.com/verus-lang/verus
+#   2. Run: verus src/lib.rs
+
+[dependencies]
+# vstd is provided by Verus, not from crates.io
+# When running with Verus, it will provide the vstd library
+
+[features]
+default = []
