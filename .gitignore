@@ -1,6 +1,9 @@
 # Rust build artifacts
 /target/
+**/target/
 **/*.rs.bk
+**/Cargo.lock
+!/Cargo.lock
 
 # Environment and secrets
 .env
