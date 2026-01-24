@@ -203,3 +203,94 @@ mod proptests {
         }
     }
 }
+
+/// Kani formal verification proofs
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Helper: generate a bounded-length digit string for Kani
+    fn any_digit_string<const N: usize>() -> String {
+        let mut s = String::new();
+        for _ in 0..N {
+            let digit: u8 = kani::any();
+            kani::assume(digit < 10);
+            s.push((b'0' + digit) as char);
+        }
+        s
+    }
+
+    /// Proves: phone_number never panics for pure digit input (10 digits)
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn phone_redaction_10_digits_never_panics() {
+        let input = any_digit_string::<10>();
+        let result = phone_number(&input);
+        // Should not panic - if we reach here, success
+        kani::assert(result.len() == 10, "output length must equal input digit count");
+    }
+
+    /// Proves: phone_number preserves length for 5-digit input
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn phone_length_preserved_5() {
+        let input = any_digit_string::<5>();
+        let result = phone_number(&input);
+        kani::assert(result.len() == 5, "redacted length must match digit count");
+    }
+
+    /// Proves: short numbers (≤4 digits) are fully masked
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn phone_short_fully_masked() {
+        let input = any_digit_string::<4>();
+        let result = phone_number(&input);
+        // All characters should be '*'
+        for c in result.chars() {
+            kani::assert(c == '*', "short numbers must be fully masked");
+        }
+    }
+
+    /// Proves: phone_number keeps last 4 digits for long numbers
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn phone_keeps_last_4_digits() {
+        let input = any_digit_string::<10>();
+        let result = phone_number(&input);
+
+        // Last 4 chars of result should match last 4 chars of input
+        let input_last4: String = input.chars().skip(6).collect();
+        let result_last4: String = result.chars().skip(6).collect();
+        kani::assert(input_last4 == result_last4, "last 4 digits must be preserved");
+    }
+
+    /// Proves: redacted prefix contains only asterisks
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn phone_prefix_only_asterisks() {
+        let input = any_digit_string::<10>();
+        let result = phone_number(&input);
+
+        // First 6 chars should all be '*'
+        for c in result.chars().take(6) {
+            kani::assert(c == '*', "prefix must be all asterisks");
+        }
+    }
+
+    /// Proves: original digits never appear in masked prefix (PII protection)
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn phone_pii_not_leaked_in_prefix() {
+        let input = any_digit_string::<10>();
+        let result = phone_number(&input);
+
+        // The first 6 digits of input should NOT appear in the first 6 chars of output
+        let input_prefix: String = input.chars().take(6).collect();
+        let result_prefix: String = result.chars().take(6).collect();
+
+        // Result prefix should be all asterisks, so no digit leakage
+        for c in result_prefix.chars() {
+            kani::assert(!c.is_ascii_digit(), "no digits should leak in prefix");
+        }
+    }
+}

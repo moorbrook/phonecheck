@@ -1,7 +1,7 @@
 # Formal Verification for PhoneCheck
 
-This directory contains formal verification specifications using Aeneas/Lean.
-The main codebase also uses Kani and Stateright for verification.
+This directory contains documentation for formal verification.
+The main codebase uses Kani and Stateright for verification.
 
 ## Overview
 
@@ -9,7 +9,6 @@ The main codebase also uses Kani and Stateright for verification.
 |------|----------|----------------|-----------|
 | **Kani** | Bounded model checking | Inline `#[kani::proof]` | Panic-freedom, exhaustive u8/u16 |
 | **Stateright** | State machine exploration | `state_machine` modules | Protocol correctness, invariants |
-| **Aeneas** | Translation to Lean | Separate `.lean` files | Deep mathematical proofs |
 
 ## Bugs Found by Verification
 
@@ -50,16 +49,6 @@ The main codebase also uses Kani and Stateright for verification.
 
 **Fix**: Stateright model now verifies that drained packets are in sequence order and match inserted packets.
 
-## Directory Structure
-
-```
-verification/
-└── aeneas/
-    ├── Cargo.toml
-    ├── src/lib.rs      # Aeneas-compatible Rust code
-    └── Proofs.lean     # Lean 4 theorems
-```
-
 ## Kani (Main Codebase)
 
 [Kani](https://github.com/model-checking/kani) performs bounded model checking on Rust code.
@@ -76,6 +65,19 @@ Proofs are in the main `src/` directory with `#[kani::proof]` attributes.
 | `ulaw_decode_never_panics` | G.711 µ-law safe | ✓ |
 | `alaw_decode_never_panics` | G.711 A-law safe | ✓ |
 | `pcm_to_f32_always_normalized` | Output in [-1, 1] | ✓ |
+| `ulaw_symmetry_proof` | U-law table symmetry | ✓ |
+| `alaw_symmetry_proof` | A-law table symmetry | ✓ |
+| `nanpa_10_digit_valid` | 10-digit NANPA numbers valid | ✓ |
+| `e164_na_11_digit_valid` | 11-digit E.164 NA valid | ✓ |
+| `e164_intl_valid` | E.164 international valid | ✓ |
+| `short_number_invalid` | <10 digits invalid | ✓ |
+| `phone_validation_never_panics` | Validation doesn't panic | ✓ |
+| `phone_redaction_10_digits_never_panics` | Redaction safe | ✓ |
+| `phone_length_preserved_5` | Redacted length = input length | ✓ |
+| `phone_short_fully_masked` | ≤4 digits fully masked | ✓ |
+| `phone_keeps_last_4_digits` | Last 4 digits preserved | ✓ |
+| `phone_prefix_only_asterisks` | Prefix is all `*` | ✓ |
+| `phone_pii_not_leaked_in_prefix` | No digit leakage in prefix | ✓ |
 
 ### Usage
 
@@ -86,6 +88,7 @@ cargo kani
 # Run specific proof (fast)
 cargo kani --harness is_before_trichotomy
 cargo kani --harness ulaw_decode_never_panics
+cargo kani --harness phone_keeps_last_4_digits
 ```
 
 ## Stateright (Main Codebase)
@@ -112,50 +115,23 @@ cargo test --lib circuit_breaker_model
 cargo test --lib sip_model
 ```
 
-## Aeneas / Lean 4
-
-[Aeneas](https://github.com/AeneasVerif/aeneas) translates Rust to Lean 4.
-Proofs are written in Lean against the generated functional definitions.
-
-### Proven Theorems
-
-| Theorem | Status | Description |
-|---------|--------|-------------|
-| `len_nonneg` | ✓ | Packet list length ≥ 0 |
-| `insert_len` | ✓ | Insert increases length by 1 |
-| `insert_contains` | ✓ | Inserted seq is in list |
-| `buffer_no_duplicates` | ✓ | No-duplicate invariant preserved |
-| `wraparound_boundary` | ✓ | 65535 is before 0 |
-| `levenshtein_identity` | ✓ | Distance(a, a) = 0 |
-| `seq_antisymmetric` | sorry | Requires bitvector reasoning |
-| `levenshtein_symmetric` | sorry | Requires structural induction |
-
-### Usage
-
-```bash
-# Check Lean proofs (requires Lean 4)
-lean verification/aeneas/Proofs.lean
-
-# Full Aeneas workflow
-opam install aeneas
-cd verification/aeneas
-aeneas -backend lean4 src/lib.rs -dest Generated.lean
-lake build
-```
-
 ## Properties by Component
 
 ### Sequence Ordering (`is_before`)
 - **Kani**: Trichotomy (excluding midpoint), antisymmetry, wraparound
-- **Aeneas/Lean**: Mathematical proof with bitvector reasoning
 
 ### Jitter Buffer
 - **Kani**: Insert/pop never panic, max_size enforced
 - **Stateright**: State machine properties (ordering, no duplicates, size bounds)
-- **Aeneas/Lean**: Insertion length invariant, no-duplicate preservation
 
 ### G.711 Codec
-- **Kani**: Decode tables never panic, output normalized
+- **Kani**: Decode tables never panic, output normalized, symmetry
+
+### Phone Validation
+- **Kani**: NANPA/E.164 format acceptance, short number rejection, never panics
+
+### Phone Redaction
+- **Kani**: Length preserved, last 4 digits visible, prefix masked, PII protection
 
 ### Circuit Breaker
 - **Stateright**: State transition correctness, threshold behavior

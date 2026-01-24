@@ -189,7 +189,7 @@ fn parse_xor_mapped_address(data: &[u8], magic_bytes: &[u8]) -> Result<SocketAdd
             if data.len() < 20 {
                 anyhow::bail!("XOR-MAPPED-ADDRESS IPv6 too short");
             }
-            let mut addr_bytes = [0u8; 16];
+            let _addr_bytes = [0u8; 16];
             // XOR with magic cookie + transaction ID
             let mut xor_bytes = [0u8; 16];
             xor_bytes[0..4].copy_from_slice(magic_bytes);
