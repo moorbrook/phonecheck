@@ -22,11 +22,9 @@ pub struct Config {
     pub expected_phrase: String,
     pub listen_duration_secs: u64,
 
-    // voip.ms SMS API
-    pub voipms_api_user: String,
-    pub voipms_api_pass: String,
-    pub voipms_sms_did: String,
-    pub alert_phone: String,
+    // Pushover notifications
+    pub pushover_user_key: String,
+    pub pushover_api_token: String,
 
     // Whisper model path (GGML format, e.g., ggml-base.en.bin)
     pub whisper_model_path: String,
@@ -73,10 +71,8 @@ impl Config {
                 .parse()
                 .unwrap_or(10),
 
-            voipms_api_user: get("VOIPMS_API_USER").context("VOIPMS_API_USER not set")?,
-            voipms_api_pass: get("VOIPMS_API_PASS").context("VOIPMS_API_PASS not set")?,
-            voipms_sms_did: get("VOIPMS_SMS_DID").context("VOIPMS_SMS_DID not set")?,
-            alert_phone: get("ALERT_PHONE").context("ALERT_PHONE not set")?,
+            pushover_user_key: get("PUSHOVER_USER_KEY").context("PUSHOVER_USER_KEY not set")?,
+            pushover_api_token: get("PUSHOVER_API_TOKEN").context("PUSHOVER_API_TOKEN not set")?,
 
             whisper_model_path: get("WHISPER_MODEL_PATH")
                 .unwrap_or_else(|| "./models/ggml-base.en.bin".to_string()),
@@ -119,25 +115,11 @@ impl Config {
             ));
         }
 
-        // Validate phone numbers (10 digits for voip.ms)
+        // Validate phone number (10 digits for voip.ms)
         if !Self::is_valid_phone(&self.target_phone) {
             errors.push(format!(
                 "TARGET_PHONE '{}' invalid. Expected 10 digits.",
                 self.target_phone
-            ));
-        }
-
-        if !Self::is_valid_phone(&self.alert_phone) {
-            errors.push(format!(
-                "ALERT_PHONE '{}' invalid. Expected 10 digits.",
-                self.alert_phone
-            ));
-        }
-
-        if !Self::is_valid_phone(&self.voipms_sms_did) {
-            errors.push(format!(
-                "VOIPMS_SMS_DID '{}' invalid. Expected 10 digits.",
-                self.voipms_sms_did
             ));
         }
 
@@ -183,10 +165,8 @@ mod tests {
         m.insert("SIP_PASSWORD", "testpass");
         m.insert("SIP_SERVER", "sip.example.com");
         m.insert("TARGET_PHONE", "5551234567");
-        m.insert("VOIPMS_API_USER", "apiuser");
-        m.insert("VOIPMS_API_PASS", "apipass");
-        m.insert("VOIPMS_SMS_DID", "5559876543");
-        m.insert("ALERT_PHONE", "5551112222");
+        m.insert("PUSHOVER_USER_KEY", "user123");
+        m.insert("PUSHOVER_API_TOKEN", "token456");
         m
     }
 
@@ -258,8 +238,8 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_required_voipms_fields() {
-        for field in ["VOIPMS_API_USER", "VOIPMS_API_PASS", "VOIPMS_SMS_DID", "ALERT_PHONE"] {
+    fn test_missing_required_pushover_fields() {
+        for field in ["PUSHOVER_USER_KEY", "PUSHOVER_API_TOKEN"] {
             let mut env = minimal_valid_env();
             env.remove(field);
             let result = Config::from_map(&env);
@@ -395,13 +375,11 @@ mod proptests {
             "[0-9]{10}",             // target_phone
             "[a-z ]{5,30}",          // expected_phrase
             1u64..=300u64,           // listen_duration
-            "[a-z]{3,10}",           // voipms_api_user
-            "[a-z0-9]{8,16}",        // voipms_api_pass
-            "[0-9]{10}",             // voipms_sms_did
-            "[0-9]{10}",             // alert_phone
+            "[a-z0-9]{20,30}",       // pushover_user_key
+            "[a-z0-9]{20,30}",       // pushover_api_token
         )
             .prop_map(
-                |(user, pass, server, port, phone, phrase, duration, api_user, api_pass, did, alert)| {
+                |(user, pass, server, port, phone, phrase, duration, po_user, po_token)| {
                     let mut m = HashMap::new();
                     m.insert("SIP_USERNAME", user);
                     m.insert("SIP_PASSWORD", pass);
@@ -410,10 +388,8 @@ mod proptests {
                     m.insert("TARGET_PHONE", phone);
                     m.insert("EXPECTED_PHRASE", phrase);
                     m.insert("LISTEN_DURATION_SECS", duration.to_string());
-                    m.insert("VOIPMS_API_USER", api_user);
-                    m.insert("VOIPMS_API_PASS", api_pass);
-                    m.insert("VOIPMS_SMS_DID", did);
-                    m.insert("ALERT_PHONE", alert);
+                    m.insert("PUSHOVER_USER_KEY", po_user);
+                    m.insert("PUSHOVER_API_TOKEN", po_token);
                     m
                 },
             )
@@ -435,10 +411,8 @@ mod proptests {
             env.insert("SIP_SERVER", "server.com".to_string());
             env.insert("SIP_PORT", port_str);
             env.insert("TARGET_PHONE", "1234567890".to_string());
-            env.insert("VOIPMS_API_USER", "apiuser".to_string());
-            env.insert("VOIPMS_API_PASS", "apipass".to_string());
-            env.insert("VOIPMS_SMS_DID", "1234567890".to_string());
-            env.insert("ALERT_PHONE", "1234567890".to_string());
+            env.insert("PUSHOVER_USER_KEY", "userkey123".to_string());
+            env.insert("PUSHOVER_API_TOKEN", "token456".to_string());
 
             let _ = Config::from_getter(|key| env.get(key).cloned());
             // If we get here without panicking, the test passes
@@ -452,10 +426,8 @@ mod proptests {
             env.insert("SIP_SERVER", "server.com".to_string());
             env.insert("TARGET_PHONE", "1234567890".to_string());
             env.insert("EXPECTED_PHRASE", phrase.clone());
-            env.insert("VOIPMS_API_USER", "apiuser".to_string());
-            env.insert("VOIPMS_API_PASS", "apipass".to_string());
-            env.insert("VOIPMS_SMS_DID", "1234567890".to_string());
-            env.insert("ALERT_PHONE", "1234567890".to_string());
+            env.insert("PUSHOVER_USER_KEY", "userkey123".to_string());
+            env.insert("PUSHOVER_API_TOKEN", "token456".to_string());
 
             let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
             prop_assert_eq!(config.expected_phrase, phrase.to_lowercase());

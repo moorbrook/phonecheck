@@ -15,10 +15,8 @@ Monitor your business phone system to ensure callers hear the correct greeting. 
 
 - Rust 1.70+
 - CMake (for building whisper.cpp)
-- A [voip.ms](https://voip.ms) account with:
-  - A SIP sub-account for making calls
-  - SMS-enabled DID for sending alerts
-  - API access enabled
+- A [voip.ms](https://voip.ms) account with a SIP sub-account for making calls
+- A [Pushover](https://pushover.net) account for push notifications
 
 ## Installation
 
@@ -38,9 +36,7 @@ curl -L -o models/ggml-base.en.bin \
 
 ## voip.ms Setup
 
-PhoneCheck requires a [voip.ms](https://voip.ms) account. You'll need to configure three things:
-
-### 1. Create a SIP Sub-Account (for making calls)
+PhoneCheck requires a [voip.ms](https://voip.ms) account for SIP calling:
 
 1. Log in to [voip.ms portal](https://voip.ms)
 2. Go to **Main Menu → Sub Accounts → Create Sub Account**
@@ -48,33 +44,15 @@ PhoneCheck requires a [voip.ms](https://voip.ms) account. You'll need to configu
 4. Note the assigned SIP server (e.g., `atlanta.voip.ms`)
 5. Set **CallerID** to a DID you own (required for outbound calls)
 
-### 2. Enable the REST API (for sending SMS alerts)
+## Pushover Setup
 
-1. Go to **Main Menu → SOAP and REST/JSON API** ([direct link](https://voip.ms/m/api.php))
-2. Click **Enable API** if not already enabled
-3. Set an **API Password** (different from your login password) and click **Save API Password**
-4. Under **IP Addresses**, either:
-   - Add your server's IP address, OR
-   - Enter `0.0.0.0` to allow access from any IP (less secure)
-5. Click **Save IP Addresses**
+PhoneCheck uses [Pushover](https://pushover.net) for push notifications ($5 one-time purchase):
 
-Your API credentials are:
-- **Username**: Your voip.ms account email
-- **Password**: The API password you just set (not your login password)
-
-See [voip.ms API documentation](https://voip.ms/resources/api) for more details.
-
-### 3. Enable SMS on a DID (for sending alerts)
-
-1. Go to **DID Numbers → Manage DIDs**
-2. Click the **Edit** (pencil icon) button for the DID you want to use
-3. Scroll to **SMS/MMS Configuration** section
-4. Check **Enable SMS/MMS Service**
-5. Click **Apply Changes**
-
-Note: US business SMS requires [10DLC registration](https://wiki.voip.ms/article/SMS-MMS). Unregistered traffic may be filtered or incur additional fees.
-
-See [voip.ms SMS/MMS documentation](https://wiki.voip.ms/article/SMS-MMS) for more details.
+1. Create account at [pushover.net](https://pushover.net)
+2. Install Pushover app on your phone
+3. Copy your **User Key** from the dashboard
+4. Create an application at [pushover.net/apps/build](https://pushover.net/apps/build)
+5. Copy the **API Token** for your app
 
 ## Configuration
 
@@ -93,10 +71,8 @@ cp .env.example .env
 | `SIP_SERVER` | voip.ms SIP server | `atlanta.voip.ms` |
 | `TARGET_PHONE` | Phone number to call | `19095551234` |
 | `EXPECTED_PHRASE` | Phrase to detect in greeting | `thank you for calling` |
-| `VOIPMS_API_USER` | voip.ms main account email | `you@email.com` |
-| `VOIPMS_API_PASS` | voip.ms API password | `apipassword` |
-| `VOIPMS_SMS_DID` | SMS-enabled DID | `19095559999` |
-| `ALERT_PHONE` | Your cell phone for alerts | `19095558888` |
+| `PUSHOVER_USER_KEY` | Your Pushover user key | `uQiRzpo4DXghDmr9QzzfQu27cmVRsG` |
+| `PUSHOVER_API_TOKEN` | Your Pushover app API token | `azGDORePK8gMaC0QOYAMyEEuzJnyUi` |
 | `WHISPER_MODEL_PATH` | Path to Whisper model | `./models/ggml-base.en.bin` |
 
 ### Optional Settings
@@ -182,7 +158,7 @@ curl http://localhost:8080/health
                                    YES               NO
                                     │                 │
                                     ▼                 ▼
-                               (no action)      Send SMS Alert
+                               (no action)      Send Push Alert
 ```
 
 ## Phrase Matching
@@ -256,10 +232,10 @@ RUST_LOG=warn ./target/release/phonecheck          # Quiet
 - PhoneCheck uses STUN + NAT hole punching for reliable audio behind NAT
 - No port forwarding required in most cases
 
-### SMS alerts not sending
-- Verify `VOIPMS_API_USER` and `VOIPMS_API_PASS`
-- Check that `VOIPMS_SMS_DID` has SMS enabled
-- Ensure API access is enabled in voip.ms portal
+### Pushover alerts not sending
+- Verify `PUSHOVER_USER_KEY` and `PUSHOVER_API_TOKEN` are correct
+- Check Pushover app is installed on your device
+- Ensure notifications are enabled for the Pushover app
 
 ## License
 
