@@ -119,24 +119,24 @@ impl Config {
             ));
         }
 
-        // Validate phone number formats (NANPA: 10 digits)
-        if !Self::is_valid_phone_number(&self.target_phone) {
+        // Validate phone numbers (10 digits for voip.ms)
+        if !Self::is_valid_phone(&self.target_phone) {
             errors.push(format!(
-                "TARGET_PHONE '{}' invalid. Expected 10-digit NANPA or E.164 format.",
+                "TARGET_PHONE '{}' invalid. Expected 10 digits.",
                 self.target_phone
             ));
         }
 
-        if !Self::is_valid_phone_number(&self.alert_phone) {
+        if !Self::is_valid_phone(&self.alert_phone) {
             errors.push(format!(
-                "ALERT_PHONE '{}' invalid. Expected 10-digit NANPA or E.164 format.",
+                "ALERT_PHONE '{}' invalid. Expected 10 digits.",
                 self.alert_phone
             ));
         }
 
-        if !Self::is_valid_phone_number(&self.voipms_sms_did) {
+        if !Self::is_valid_phone(&self.voipms_sms_did) {
             errors.push(format!(
-                "VOIPMS_SMS_DID '{}' invalid. Expected 10-digit NANPA format.",
+                "VOIPMS_SMS_DID '{}' invalid. Expected 10 digits.",
                 self.voipms_sms_did
             ));
         }
@@ -166,26 +166,10 @@ impl Config {
         }
     }
 
-    /// Check if a phone number is valid (NANPA 10-digit or E.164 format)
-    fn is_valid_phone_number(phone: &str) -> bool {
-        let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
-
-        // NANPA: exactly 10 digits
-        if digits.len() == 10 {
-            return true;
-        }
-
-        // E.164 with country code: 11 digits starting with 1 (North America)
-        if digits.len() == 11 && digits.starts_with('1') {
-            return true;
-        }
-
-        // E.164 format with + prefix
-        if phone.starts_with('+') && digits.len() >= 10 && digits.len() <= 15 {
-            return true;
-        }
-
-        false
+    /// Check if a phone number is valid (10 digits for voip.ms)
+    fn is_valid_phone(phone: &str) -> bool {
+        let digit_count = phone.chars().filter(|c| c.is_ascii_digit()).count();
+        digit_count == 10
     }
 }
 
@@ -338,25 +322,18 @@ mod tests {
     }
 
     #[test]
-    fn test_phone_number_validation_nanpa() {
-        assert!(Config::is_valid_phone_number("5551234567"));
-        assert!(Config::is_valid_phone_number("555-123-4567")); // with dashes
-        assert!(Config::is_valid_phone_number("(555) 123-4567")); // formatted
+    fn test_phone_validation_valid() {
+        assert!(Config::is_valid_phone("5551234567"));
+        assert!(Config::is_valid_phone("555-123-4567")); // with dashes (ignored)
+        assert!(Config::is_valid_phone("(555) 123-4567")); // formatted (ignored)
     }
 
     #[test]
-    fn test_phone_number_validation_e164() {
-        assert!(Config::is_valid_phone_number("+15551234567"));
-        assert!(Config::is_valid_phone_number("+1 555 123 4567")); // with spaces
-        assert!(Config::is_valid_phone_number("15551234567")); // 11 digits with country code
-    }
-
-    #[test]
-    fn test_phone_number_validation_invalid() {
-        assert!(!Config::is_valid_phone_number("555")); // too short
-        assert!(!Config::is_valid_phone_number("12345")); // too short
-        assert!(!Config::is_valid_phone_number("")); // empty
-        assert!(!Config::is_valid_phone_number("abcdefghij")); // non-numeric
+    fn test_phone_validation_invalid() {
+        assert!(!Config::is_valid_phone("555")); // too short
+        assert!(!Config::is_valid_phone("15551234567")); // 11 digits (too long)
+        assert!(!Config::is_valid_phone("")); // empty
+        assert!(!Config::is_valid_phone("abcdefghij")); // non-numeric
     }
 
     #[test]
@@ -509,84 +486,42 @@ mod kani_proofs {
         kani::assert(parsed == port, "round-trip must preserve value");
     }
 
-    /// Helper: generate a digit string of exact length
-    fn digit_string<const N: usize>() -> String {
-        let mut s = String::new();
-        for _ in 0..N {
-            let d: u8 = kani::any();
-            kani::assume(d < 10);
-            s.push((b'0' + d) as char);
-        }
-        s
-    }
-
-    /// Proves: 10-digit NANPA numbers are valid
+    /// Proves: 10-digit numbers are valid
     #[kani::proof]
     #[kani::unwind(12)]
-    fn nanpa_10_digit_valid() {
-        let phone = digit_string::<10>();
-        kani::assert(
-            Config::is_valid_phone_number(&phone),
-            "10-digit NANPA must be valid"
-        );
-    }
-
-    /// Proves: 11-digit numbers starting with '1' are valid (E.164 NA)
-    #[kani::proof]
-    #[kani::unwind(14)]
-    fn e164_na_11_digit_valid() {
-        let mut phone = String::from("1");
+    fn ten_digit_valid() {
+        let mut phone = String::new();
         for _ in 0..10 {
             let d: u8 = kani::any();
             kani::assume(d < 10);
             phone.push((b'0' + d) as char);
         }
-        kani::assert(
-            Config::is_valid_phone_number(&phone),
-            "11-digit E.164 NA must be valid"
-        );
+        kani::assert(Config::is_valid_phone(&phone), "10-digit must be valid");
     }
 
-    /// Proves: numbers with + prefix and 10-15 digits are valid (E.164 intl)
+    /// Proves: 9-digit numbers are invalid
     #[kani::proof]
-    #[kani::unwind(18)]
-    fn e164_intl_valid() {
-        let mut phone = String::from("+");
-        // Add 12 digits (within 10-15 range)
-        for _ in 0..12 {
+    #[kani::unwind(11)]
+    fn nine_digit_invalid() {
+        let mut phone = String::new();
+        for _ in 0..9 {
             let d: u8 = kani::any();
             kani::assume(d < 10);
             phone.push((b'0' + d) as char);
         }
-        kani::assert(
-            Config::is_valid_phone_number(&phone),
-            "E.164 international must be valid"
-        );
+        kani::assert(!Config::is_valid_phone(&phone), "9-digit must be invalid");
     }
 
-    /// Proves: short numbers (<10 digits) without + are invalid
+    /// Proves: 11-digit numbers are invalid
     #[kani::proof]
-    #[kani::unwind(11)]
-    fn short_number_invalid() {
-        let phone = digit_string::<9>();
-        kani::assert(
-            !Config::is_valid_phone_number(&phone),
-            "9-digit number must be invalid"
-        );
-    }
-
-    /// Proves: phone validation never panics
-    #[kani::proof]
-    #[kani::unwind(18)]
-    fn phone_validation_never_panics() {
-        // Test with arbitrary 15-char ASCII input
+    #[kani::unwind(13)]
+    fn eleven_digit_invalid() {
         let mut phone = String::new();
-        for _ in 0..15 {
-            let c: u8 = kani::any();
-            kani::assume(c >= 32 && c < 127); // printable ASCII
-            phone.push(c as char);
+        for _ in 0..11 {
+            let d: u8 = kani::any();
+            kani::assume(d < 10);
+            phone.push((b'0' + d) as char);
         }
-        let _ = Config::is_valid_phone_number(&phone);
-        // If we reach here, no panic occurred
+        kani::assert(!Config::is_valid_phone(&phone), "11-digit must be invalid");
     }
 }
