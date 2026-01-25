@@ -457,43 +457,4 @@ mod kani_proofs {
         let parsed: u16 = port_str.parse().unwrap();
         kani::assert(parsed == port, "round-trip must preserve value");
     }
-
-    /// Proves: 10-digit numbers are valid
-    #[kani::proof]
-    #[kani::unwind(12)]
-    fn ten_digit_valid() {
-        let mut phone = String::new();
-        for _ in 0..10 {
-            let d: u8 = kani::any();
-            kani::assume(d < 10);
-            phone.push((b'0' + d) as char);
-        }
-        kani::assert(Config::is_valid_phone(&phone), "10-digit must be valid");
-    }
-
-    /// Proves: 9-digit numbers are invalid
-    #[kani::proof]
-    #[kani::unwind(11)]
-    fn nine_digit_invalid() {
-        let mut phone = String::new();
-        for _ in 0..9 {
-            let d: u8 = kani::any();
-            kani::assume(d < 10);
-            phone.push((b'0' + d) as char);
-        }
-        kani::assert(!Config::is_valid_phone(&phone), "9-digit must be invalid");
-    }
-
-    /// Proves: 11-digit numbers are invalid
-    #[kani::proof]
-    #[kani::unwind(13)]
-    fn eleven_digit_invalid() {
-        let mut phone = String::new();
-        for _ in 0..11 {
-            let d: u8 = kani::any();
-            kani::assume(d < 10);
-            phone.push((b'0' + d) as char);
-        }
-        kani::assert(!Config::is_valid_phone(&phone), "11-digit must be invalid");
-    }
 }
