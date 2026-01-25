@@ -187,7 +187,7 @@ curl http://localhost:8080/health
 
 ## Phrase Matching
 
-PhoneCheck uses fuzzy matching to handle minor transcription errors:
+PhoneCheck uses Levenshtein distance (edit distance) for fuzzy matching:
 
 - Case insensitive
 - Allows 1 character difference per word (for words > 3 characters)
@@ -197,6 +197,21 @@ Examples that match `"thank you for calling"`:
 - `"Thank you for calling"` (case difference)
 - `"thanks you for calling"` (1 char difference in "thank")
 - `"thank you for calling Acme Corp"` (extra words OK)
+
+### Algorithm Tradeoffs
+
+We evaluated several matching approaches:
+
+| Algorithm | Pros | Cons | Best For |
+|-----------|------|------|----------|
+| **Levenshtein** (current) | Simple, fast, deterministic, no dependencies | Only catches typos, not synonyms | Transcription errors like `"machinary"` |
+| **Jaro-Winkler** | Good for prefix similarity, scores 0-1 | Weights prefixes heavily, may false-positive on short words | Name matching, abbreviations |
+| **Soundex** | Phonetic matching | Too coarse, groups dissimilar words | Spelling variations of names |
+| **Word2Vec/GloVe** | Semantic word similarity | Word-level only, requires ~100-300MB model | Synonym matching |
+| **Sentence-BERT** | Full sentence semantics, handles paraphrasing | Requires ~80-400MB model + ML runtime | Intent matching, variable phrasings |
+| **LLM** | Best semantic understanding | Slow, expensive, requires API or large model | Complex intent classification |
+
+**Why Levenshtein?** Whisper transcription errors are typically character-level typos (`"machinery"` → `"machinary"`), not semantic variations. The greeting is scripted and consistent, so we don't need synonym or paraphrase matching. Levenshtein is fast, has no dependencies, and handles actual transcription errors well.
 
 ## NAT Traversal
 
