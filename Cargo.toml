@@ -57,6 +57,7 @@ digest = "0.10"
 
 # High-quality audio resampling
 rubato = "0.16"
+fs2 = "0.4.3"
 
 [dev-dependencies]
 # Property-based testing

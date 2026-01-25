@@ -8,7 +8,9 @@ mod sip;
 mod speech;
 mod stun;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use fs2::FileExt;
+use std::fs::File;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -68,6 +70,18 @@ async fn main() -> Result<()> {
         print_help();
         return Ok(());
     }
+
+    // Acquire singleton lock (skip for --validate since it doesn't make calls)
+    let _lock_file = if !args.validate {
+        let lock_path = std::env::temp_dir().join("phonecheck.lock");
+        let file = File::create(&lock_path)
+            .with_context(|| format!("Failed to create lock file: {:?}", lock_path))?;
+        file.try_lock_exclusive()
+            .context("Another instance of phonecheck is already running")?;
+        Some(file)
+    } else {
+        None
+    };
 
     // Load .env file if present
     let _ = dotenvy::dotenv();
