@@ -2,6 +2,18 @@
 
 A PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, transcribes the audio greeting using Whisper, and sends push notifications if the expected phrase is not detected.
 
+## Voice AI Building Blocks
+
+This project implements many core components needed for voice AI phone applications:
+
+- **SIP/VoIP Client** - Outbound calling with digest authentication (RFC 3261, 2617)
+- **RTP Audio Handling** - Packet reception, jitter buffer, sequence ordering
+- **G.711 Codec** - μ-law/A-law decoding with ITU-T compliant lookup tables
+- **Audio Resampling** - 8kHz → 16kHz conversion for Whisper compatibility
+- **NAT Traversal** - STUN discovery + RTP hole punching for reliable audio behind NAT
+- **Speech Recognition** - Whisper integration with fuzzy phrase matching
+- **Formal Verification** - Kani proofs and Stateright models for correctness
+
 ## Use Case
 
 Monitor your business phone system to ensure callers hear the correct greeting. PhoneCheck will:
