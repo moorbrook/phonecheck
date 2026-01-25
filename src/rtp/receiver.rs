@@ -58,7 +58,16 @@ impl RtpReceiver {
     }
 
     /// Send empty RTP packets to punch through NAT
-    /// This creates a mapping in the NAT table so return traffic can reach us
+    ///
+    /// NAT traversal requires two components working together:
+    /// 1. STUN discovery - tells remote where to send RTP (public IP in SDP)
+    /// 2. Hole punching - opens NAT mapping so incoming RTP packets arrive
+    ///
+    /// Without STUN: remote tries to send to private IP (unreachable)
+    /// Without hole punch: NAT blocks incoming RTP (no mapping exists)
+    ///
+    /// This function handles #2 by sending packets to the remote first,
+    /// which creates a NAT mapping for return traffic on the same port.
     pub async fn punch_nat(&self, remote_addr: std::net::SocketAddr) -> Result<()> {
         use tracing::info;
 

@@ -198,6 +198,23 @@ Examples that match `"thank you for calling"`:
 - `"thanks you for calling"` (1 char difference in "thank")
 - `"thank you for calling Acme Corp"` (extra words OK)
 
+## NAT Traversal
+
+PhoneCheck works behind NAT without port forwarding using two techniques:
+
+1. **STUN Discovery**: Queries a STUN server to learn your public IP address, which is advertised in the SDP so the remote VoIP server knows where to send audio
+
+2. **NAT Hole Punching**: Sends empty RTP packets to the remote media server immediately after call connect, creating a NAT mapping that allows return traffic through
+
+Both are required:
+- Without STUN: The SDP advertises your private IP (192.168.x.x) which the remote can't reach
+- Without hole punching: The NAT may block incoming RTP even with the correct public IP
+
+Configure STUN in `.env`:
+```bash
+STUN_SERVER=stun.l.google.com:19302
+```
+
 ## Logging
 
 Control log verbosity with `RUST_LOG`:
@@ -220,8 +237,9 @@ RUST_LOG=warn ./target/release/phonecheck          # Quiet
 - Adjust `EXPECTED_PHRASE` to match what Whisper hears
 
 ### NAT/Firewall issues
-- Set `STUN_SERVER=stun.l.google.com:19302`
-- Ensure UDP ports 10000-20000 are open for RTP
+- Set `STUN_SERVER=stun.l.google.com:19302` (required for NAT traversal)
+- PhoneCheck uses STUN + NAT hole punching for reliable audio behind NAT
+- No port forwarding required in most cases
 
 ### SMS alerts not sending
 - Verify `VOIPMS_API_USER` and `VOIPMS_API_PASS`
