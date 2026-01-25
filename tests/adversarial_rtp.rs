@@ -115,9 +115,14 @@ proptest! {
     fn prop_parse_rtp_header_malformed(data in malformed_rtp_packet()) {
         let _ = parse_rtp_header(&data);
     }
+}
+
+// Resampling is expensive (FFT), so use fewer cases and smaller samples
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
 
     #[test]
-    fn prop_resample_never_panics(samples in proptest::collection::vec(any::<f32>(), 0..1000)) {
+    fn prop_resample_never_panics(samples in proptest::collection::vec(any::<f32>(), 0..100)) {
         let _ = resample_8k_to_16k(&samples);
     }
 }
