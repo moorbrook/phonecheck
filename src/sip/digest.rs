@@ -21,16 +21,13 @@ pub struct DigestChallenge {
 
 /// Supported digest algorithms
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub enum DigestAlgorithm {
+    #[default]
     Md5,
     Md5Sess,
 }
 
-impl Default for DigestAlgorithm {
-    fn default() -> Self {
-        Self::Md5
-    }
-}
 
 impl DigestChallenge {
     /// Parse a digest challenge from an authenticate header value
@@ -254,12 +251,12 @@ fn parse_params(s: &str) -> HashMap<String, String> {
         };
 
         let key = remaining[..eq_pos].trim().to_lowercase();
-        remaining = &remaining[eq_pos + 1..].trim_start();
+        remaining = remaining[eq_pos + 1..].trim_start();
 
         // Parse value (quoted or unquoted)
-        let (value, rest) = if remaining.starts_with('"') {
+        let (value, rest) = if let Some(remaining) = remaining.strip_prefix('"') {
             // Quoted value
-            let remaining = &remaining[1..]; // Skip opening quote
+            // Skip opening quote
             if let Some(end_quote) = remaining.find('"') {
                 let value = &remaining[..end_quote];
                 let rest = &remaining[end_quote + 1..];

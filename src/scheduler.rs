@@ -27,7 +27,7 @@ pub fn is_business_hours() -> bool {
 
 /// Testable version: check if given hour/minute/second is within business hours
 pub fn is_business_hours_at(hour: u32, _minute: u32, _second: u32) -> bool {
-    hour >= BUSINESS_START_HOUR && hour < BUSINESS_END_HOUR
+    (BUSINESS_START_HOUR..BUSINESS_END_HOUR).contains(&hour)
 }
 
 /// Calculate duration until next check should run
@@ -40,7 +40,7 @@ pub fn time_until_next_check() -> Option<Duration> {
 /// Testable version: calculate wait time from given hour/minute/second
 pub fn time_until_next_check_at(hour: u32, minute: u32, second: u32) -> Option<Duration> {
     // If within business hours, check at the top of the next hour
-    if hour >= BUSINESS_START_HOUR && hour < BUSINESS_END_HOUR {
+    if (BUSINESS_START_HOUR..BUSINESS_END_HOUR).contains(&hour) {
         // If it's within the first 5 seconds of the hour, run now
         if minute == 0 && second < 5 {
             return None;
@@ -89,7 +89,7 @@ pub fn is_business_hours_with_tolerance() -> bool {
 /// Testable version with tolerance for boundary conditions
 pub fn is_business_hours_with_tolerance_at(hour: u32, minute: u32, second: u32) -> bool {
     // Standard business hours check
-    if hour >= BUSINESS_START_HOUR && hour < BUSINESS_END_HOUR {
+    if (BUSINESS_START_HOUR..BUSINESS_END_HOUR).contains(&hour) {
         return true;
     }
 

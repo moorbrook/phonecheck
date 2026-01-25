@@ -275,7 +275,7 @@ pub fn extract_to_tag(response: &str) -> Option<String> {
                 let tag_value = &line[tag_start..];
                 // Tag ends at ; or end of line
                 let tag_end = tag_value
-                    .find(|c: char| c == ';' || c == '>' || c == '\r' || c == '\n')
+                    .find([';', '>', '\r', '\n'])
                     .unwrap_or(tag_value.len());
                 return Some(tag_value[..tag_end].to_string());
             }
@@ -292,7 +292,7 @@ pub fn extract_via_branch(response: &str) -> Option<String> {
                 let branch_start = branch_pos + 7;
                 let branch_value = &line[branch_start..];
                 let branch_end = branch_value
-                    .find(|c: char| c == ';' || c == ',' || c == '\r' || c == '\n')
+                    .find([';', ',', '\r', '\n'])
                     .unwrap_or(branch_value.len());
                 return Some(branch_value[..branch_end].to_string());
             }
@@ -326,8 +326,7 @@ pub fn extract_rtp_address(response: &str) -> Option<std::net::SocketAddr> {
         }
 
         // Parse m=audio <port> RTP/AVP ...
-        if line.starts_with("m=audio ") {
-            let rest = &line[8..];
+        if let Some(rest) = line.strip_prefix("m=audio ") {
             if let Some(port_end) = rest.find(' ') {
                 if let Ok(port) = rest[..port_end].parse() {
                     audio_port = Some(port);

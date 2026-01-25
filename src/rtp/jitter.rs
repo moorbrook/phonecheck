@@ -149,10 +149,9 @@ impl JitterBuffer {
                     available_seq
                 );
                 self.next_seq = Some(available_seq);
-                return self.packets.remove(&available_seq).map(|p| {
+                return self.packets.remove(&available_seq).inspect(|_p| {
                     self.next_seq = Some(available_seq.wrapping_add(1));
                     self.packets_output += 1;
-                    p
                 });
             }
         }
