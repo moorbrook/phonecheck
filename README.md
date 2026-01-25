@@ -1,6 +1,6 @@
 # PhoneCheck
 
-A PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, transcribes the audio greeting using Whisper, and sends SMS alerts if the expected phrase is not detected.
+A PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, transcribes the audio greeting using Whisper, and sends push notifications if the expected phrase is not detected.
 
 ## Use Case
 
@@ -9,7 +9,7 @@ Monitor your business phone system to ensure callers hear the correct greeting. 
 1. Call your phone number every hour during business hours (8am-5pm Pacific)
 2. Listen to the greeting and transcribe it using Whisper AI
 3. Check if the expected phrase is present (fuzzy matching allows minor variations)
-4. Send you an SMS alert if something is wrong
+4. Send you a push notification if something is wrong
 
 ## Requirements
 

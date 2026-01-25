@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
 
     // Initialize notifier
     let notifier = Arc::new(Notifier::new(&config));
-    info!("SMS notifier configured");
+    info!("Pushover notifier configured");
 
     // Wrap config in Arc for sharing
     let config = Arc::new(config);
@@ -254,7 +254,7 @@ async fn run_check(
 
 async fn send_alert(notifier: &Notifier, message: &str) {
     if let Err(e) = notifier.send_alert(message).await {
-        error!("Failed to send SMS alert: {}", e);
+        error!("Failed to send push notification: {}", e);
         // Log the original message so it's not lost
         error!("Original alert: {}", message);
     }

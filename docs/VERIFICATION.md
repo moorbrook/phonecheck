@@ -1,17 +1,15 @@
 # PhoneCheck Verification Strategy
 
-This document describes the multi-layered testing and verification approach used in PhoneCheck, a PBX health monitoring tool. The strategy combines traditional testing with modern formal verification techniques to achieve high assurance.
+This document describes the multi-layered testing and verification approach used in PhoneCheck. The strategy combines traditional testing with formal verification techniques.
 
 ## Overview
 
-| Layer | Tool | Purpose | Tests |
+| Layer | Tool | Purpose | Count |
 |-------|------|---------|-------|
-| Unit Tests | Rust `#[test]` | Basic correctness | 150 |
+| Unit Tests | Rust `#[test]` | Basic correctness | ~250 |
 | Property Tests | Proptest | Invariant checking | ~40 |
-| Model Checking | Stateright | State machine verification | 5 |
-| Formal Proofs | Kani | Bit-precise verification | 15+ |
-
-**Total: 150 unit tests + property-based tests + formal proofs**
+| Model Checking | Stateright | State machine verification | 3 models |
+| Formal Proofs | Kani | Bit-precise verification | 20+ |
 
 ---
 
@@ -29,22 +27,15 @@ fn test_parse_status_code() {
 }
 ```
 
-**Strengths:**
-- Easy to write and understand
-- Fast execution
-- Good for documenting expected behavior
-
-**Limitations:**
-- Only tests specific examples
-- Easy to miss edge cases
+**Strengths:** Easy to write, fast execution, documents expected behavior
+**Limitations:** Only tests specific examples, easy to miss edge cases
 
 ### 2. Property-Based Testing (Proptest)
 
-Instead of testing specific examples, property tests verify that invariants hold for randomly generated inputs.
+Verifies that invariants hold for randomly generated inputs.
 
 ```rust
 proptest! {
-    /// Levenshtein distance is symmetric: edit(a,b) == edit(b,a)
     #[test]
     fn levenshtein_symmetric(a in "[a-z]{0,20}", b in "[a-z]{0,20}") {
         prop_assert_eq!(levenshtein(&a, &b), levenshtein(&b, &a));
@@ -52,15 +43,11 @@ proptest! {
 }
 ```
 
-**What Proptest Found:**
-- **URL encoding test bug**: Initial test expected 4 `&` separators in URL, but proptest revealed there are actually 5 parameters requiring 5 separators
-- **Test assumption errors**: `words_similar("thank", "thanks")` returns `true` (1 char difference is allowed for words >3 chars), which proptest helped clarify
-
 **Coverage by Module:**
+
 | Module | Properties Tested |
 |--------|-------------------|
 | config.rs | Valid configs parse, port parsing never panics |
-| notify.rs | URL encoding safety, backoff bounds |
 | speech.rs | Levenshtein symmetry, identity, triangle inequality |
 | scheduler.rs | Business hours boundaries, wait time bounds |
 | rtp/receiver.rs | Resample length, output range |
@@ -68,24 +55,21 @@ proptest! {
 
 ### 3. Model Checking (Stateright)
 
-Stateright exhaustively explores all possible states of a system to verify properties.
+[Stateright](https://github.com/stateright/stateright) exhaustively explores all possible states of a system.
 
-**SIP Call State Machine Model (`src/sip/model.rs`):**
+**SIP Call State Machine Model:**
 
 ```rust
 impl Model for SipCallChecker {
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
-            // Safety: RTP is only active when call is established
             Property::always("rtp_only_when_established", |_, state| {
                 !state.rtp_active || state.state == CallState::Established
             }),
-            // Safety: When terminated, RTP must be inactive
             Property::always("clean_termination", |_, state| {
                 !matches!(state.state, CallState::Terminated | CallState::Failed)
                     || !state.rtp_active
             }),
-            // Liveness: Call eventually terminates
             Property::eventually("call_terminates", |_, state| {
                 matches!(state.state, CallState::Terminated | CallState::Failed)
             }),
@@ -94,67 +78,85 @@ impl Model for SipCallChecker {
 }
 ```
 
-**What Stateright Verifies:**
-1. **No orphan RTP sessions**: RTP is always cleaned up before termination
-2. **BYE before terminating**: The BYE message is always sent before entering terminating state
-3. **No deadlocks**: Every call eventually reaches a terminal state
-4. **State consistency**: No invalid state transitions are possible
+**Models:**
 
-**Model Statistics:**
-- States explored: ~50 unique states
-- Properties verified: 5 safety + liveness properties
-- Execution time: <100ms
+| Model | States | Properties Verified |
+|-------|--------|---------------------|
+| `JitterBufferModel` | 51 | Size bounds, no duplicates, ordered output |
+| `CircuitBreakerModel` | ~50 | State transitions, threshold behavior |
+| `SipModel` | 270 | Auth flows, timeouts, retries |
 
 ### 4. Formal Verification (Kani)
 
-Kani uses symbolic execution and SMT solving to mathematically prove properties about code for *all possible inputs*.
+[Kani](https://github.com/model-checking/kani) uses symbolic execution to mathematically prove properties for *all possible inputs*.
 
 ```rust
 #[kani::proof]
 fn ulaw_decode_never_panics() {
-    let byte: u8 = kani::any();  // Represents ALL possible u8 values
+    let byte: u8 = kani::any();  // ALL possible u8 values
     let _result = ULAW_TO_PCM[byte as usize];
     // If we reach here, no panic occurred for ANY input
 }
 ```
 
-**Kani Proofs by Module:**
+**Verified Properties:**
 
-| Module | Proofs | What's Verified |
-|--------|--------|-----------------|
-| rtp/g711.rs | 6 | Codec lookup never panics, symmetry |
-| speech.rs | 3 | Levenshtein never panics, identity |
-| scheduler.rs | 2 | Business hours logic, wait time bounds |
-| config.rs | 2 | Port parsing safety |
-| notify.rs | 2 | Backoff calculation safety |
-| rtp/receiver.rs | 3 | Header parsing, resample length |
-| sip/messages.rs | 2 | Status parsing safety |
-
-**What Kani Proves:**
-- **No panics**: Array indexing, arithmetic operations cannot panic
-- **Bounds correctness**: All values stay within expected ranges
-- **Invariants**: Properties hold for *every possible input*
+| Harness | Property | Status |
+|---------|----------|--------|
+| `is_before_trichotomy` | Ordering holds (excluding midpoint) | ✓ |
+| `is_before_midpoint_ambiguous` | Midpoint case documented | ✓ |
+| `is_before_antisymmetric` | If a < b then ¬(b < a) | ✓ |
+| `is_before_wraparound_boundary` | 65535 is before 0 | ✓ |
+| `ulaw_decode_never_panics` | G.711 µ-law safe | ✓ |
+| `alaw_decode_never_panics` | G.711 A-law safe | ✓ |
+| `pcm_to_f32_always_normalized` | Output in [-1, 1] | ✓ |
+| `ulaw_symmetry_proof` | U-law table symmetry | ✓ |
+| `alaw_symmetry_proof` | A-law table symmetry | ✓ |
+| `nanpa_10_digit_valid` | 10-digit phone numbers valid | ✓ |
+| `short_number_invalid` | <10 digits invalid | ✓ |
+| `phone_validation_never_panics` | Validation doesn't panic | ✓ |
+| `phone_redaction_10_digits_never_panics` | Redaction safe | ✓ |
+| `phone_keeps_last_4_digits` | Last 4 digits preserved | ✓ |
+| `phone_prefix_only_asterisks` | Prefix is all `*` | ✓ |
+| `business_hours_valid_range` | 8am-5pm Pacific correct | ✓ |
+| `time_until_bounded` | Wait time ≤ 24h | ✓ |
 
 ---
 
-## Bugs and Issues Found
+## Bugs Found by Verification
 
-### 1. Test Logic Error (Proptest)
+### 1. Sequence Number Trichotomy Bug (Kani)
 
-**File:** `notify.rs`
-**Issue:** URL test expected 4 `&` separators but actual URL has 5 parameters
+**Problem**: The `is_before()` function for RTP sequence ordering was assumed to satisfy trichotomy (exactly one of `a < b`, `b < a`, or `a == b` holds).
 
+**Found by**: Kani proof `is_before_trichotomy` failed with counterexample.
+
+**Root cause**: When sequence numbers are exactly 0x8000 (32768) apart, neither direction returns true:
 ```rust
-// WRONG: Expected 4 separators
-prop_assert_eq!(param_count, 4);
-
-// CORRECT: 6 parameters need 5 separators
-prop_assert_eq!(param_count, 5);
+// For a = 0, b = 32768:
+// diff = b.wrapping_sub(a) = 32768
+// is_before(a, b) = (32768 > 0 && 32768 < 32768) = false
+// is_before(b, a) = (32768 > 0 && 32768 < 32768) = false
+// a != b, so trichotomy violated!
 ```
 
-**How Found:** Proptest with `pass = "="` as input
+**Fix**: Documented that the midpoint case is intentionally ambiguous.
 
-### 2. Test Assumption Error (Unit Test)
+### 2. Circuit Breaker State Space Explosion (Stateright)
+
+**Problem**: Initial Stateright model hung during model checking.
+
+**Root cause**: Using a counter for time created too many states (time × failures × state = millions).
+
+**Fix**: Simplified to boolean `timeout_elapsed` flag, reducing state space to ~51 states.
+
+### 3. JitterBuffer Drain Ordering (Stateright)
+
+**Problem**: Initial test for `drain()` only checked that packets were returned, not their order.
+
+**Fix**: Stateright model now verifies drained packets are in sequence order.
+
+### 4. Test Assumption Error (Proptest)
 
 **File:** `speech.rs`
 **Issue:** Test assumed "thank" and "thanks" are not similar
@@ -167,51 +169,39 @@ assert!(!words_similar("thank", "thanks"));
 assert!(words_similar("thank", "thanks"));
 ```
 
-**How Found:** Running tests against actual implementation
-
-### 3. Non-Deterministic Tests (Original Code)
+### 5. Non-Deterministic Tests
 
 **File:** `scheduler.rs`
 **Issue:** Time-dependent tests couldn't verify business hours logic
 
+**Fix:** Refactored to accept injectable time values:
 ```rust
-// ORIGINAL: Result depends on when test runs
-#[test]
-fn test_is_business_hours_boundaries() {
-    let _ = is_business_hours(); // Just verify it doesn't panic
-}
-
-// FIXED: Testable version with injectable time
 pub fn is_business_hours_at(hour: u32, minute: u32, second: u32) -> bool {
     hour >= BUSINESS_START_HOUR && hour < BUSINESS_END_HOUR
 }
 ```
 
-**How Fixed:** Refactored to accept injectable time values
-
 ---
 
-## Running the Tests
+## Running Tests
 
 ```bash
 # Run all unit and property tests
-cargo test --release
+cargo test
 
-# Run Stateright model checker
-cargo test sip_model --release
+# Run Stateright model tests
+cargo test --lib _model
 
 # Run Kani formal proofs
 cargo kani
 
-# Run ignored network tests (requires UDP loopback)
-cargo test --release -- --ignored
+# Run specific Kani proof
+cargo kani --harness ulaw_decode_never_panics
 ```
 
 ---
 
-## Why This Approach?
-
-### Defense in Depth
+## Defense in Depth
 
 Each layer catches different types of bugs:
 
@@ -226,15 +216,6 @@ Each layer catches different types of bugs:
 
 ✓ = strong coverage, ○ = partial coverage
 
-### Cost-Benefit
-
-| Approach | Setup Cost | Maintenance | Coverage | Confidence |
-|----------|------------|-------------|----------|------------|
-| Unit Tests | Low | Low | Examples only | Medium |
-| Proptest | Medium | Low | Random sampling | High |
-| Stateright | Medium | Medium | All states | Very High |
-| Kani | High | Low | All inputs | Mathematical |
-
 ---
 
 ## Verification Coverage Summary
@@ -244,10 +225,10 @@ Each layer catches different types of bugs:
 - SIP state machine (all transitions verified)
 - Levenshtein distance (no panics, correct properties)
 - Business hours logic (all 24 hours verified)
+- Phone number validation and redaction
 
 ### Well-Tested (Proptest + Unit Tests)
 - Configuration parsing
-- URL encoding
 - Fuzzy phrase matching
 - RTP header parsing
 - Audio resampling
@@ -259,87 +240,9 @@ Each layer catches different types of bugs:
 
 ---
 
-## Performance Optimizations
-
-Two targeted optimizations reduce memory allocations in the audio processing pipeline:
-
-### 1. Zero-Copy G.711 Decoding
-
-**Before:** Each RTP packet decode created a temporary `Vec<i16>`:
-```rust
-let decoded = decoder.decode(payload);  // Allocates ~160 bytes
-self.samples.extend(decoded);            // Copy to main buffer
-```
-
-**After:** Direct decode into pre-allocated buffer:
-```rust
-decoder.decode_into(payload, &mut self.samples);  // No temp allocation
-```
-
-**Impact:** Eliminates ~500 allocations per call (one per RTP packet).
-
-### 2. Fused PCM→f32 + Resample
-
-**Before:** Two separate passes with intermediate allocation:
-```rust
-let pcm_f32 = G711Decoder::pcm_to_f32(&self.samples);  // 320KB allocation
-let resampled = resample_8k_to_16k(&pcm_f32);           // 640KB allocation
-```
-
-**After:** Single-pass conversion and resampling:
-```rust
-// Combined: i16 → f32 → interpolated resample in one 640KB allocation
-let mut output = Vec::with_capacity(self.samples.len() * 2);
-for i in 0..self.samples.len() {
-    let sample = self.samples[i] as f32 / 32768.0;
-    output.push(sample);
-    output.push(/* interpolated */);
-}
-```
-
-**Impact:** Eliminates one 320KB intermediate allocation per call.
-
-### Verification of Optimizations
-
-Both optimizations are verified by property tests that prove equivalence with the original implementations:
-
-```rust
-proptest! {
-    #[test]
-    fn decode_into_matches_decode(bytes: Vec<u8>) {
-        let decoded = decoder.decode(&bytes);
-        let mut into_output = Vec::new();
-        decoder.decode_into(&bytes, &mut into_output);
-        prop_assert_eq!(decoded, into_output);
-    }
-
-    #[test]
-    fn fused_matches_separate(samples: Vec<i16>) {
-        let separate = resample_8k_to_16k(&G711Decoder::pcm_to_f32(&samples));
-        let fused = /* fused implementation */;
-        prop_assert!(/* values match within epsilon */);
-    }
-}
-```
-
----
-
 ## Future Improvements
 
 1. **Miri**: Run under Miri interpreter to check for undefined behavior
 2. **Loom**: Add concurrency tests if async code becomes more complex
 3. **Coverage**: Add `cargo-llvm-cov` for test coverage metrics
 4. **Fuzzing**: Add `cargo-fuzz` for finding edge cases in parsers
-
----
-
-## Conclusion
-
-This multi-layered verification approach provides:
-
-1. **Fast feedback** from unit tests during development
-2. **Edge case discovery** from property-based testing
-3. **State machine correctness** from model checking
-4. **Mathematical guarantees** from formal verification
-
-The combination catches bugs that any single approach would miss, while keeping the test suite maintainable and fast to run.

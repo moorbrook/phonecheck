@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PhoneCheck is a PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, transcribes the audio greeting using Whisper, and sends SMS alerts if the expected phrase is not detected.
+PhoneCheck is a PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, transcribes the audio greeting using Whisper, and sends push notifications via Pushover if the expected phrase is not detected.
 
 ## Build Commands
 
@@ -41,10 +41,9 @@ src/
 │   ├── mod.rs       # Module exports
 │   ├── receiver.rs  # RTP packet reception and reassembly
 │   ├── g711.rs      # G.711 u-law/A-law codec (lookup tables from ITU-T spec)
-│   ├── player.rs    # Audio playback utilities (testing)
-│   └── recorder.rs  # RTP packet capture to pcap (--record-pcap feature)
+│   └── player.rs    # Audio playback utilities (testing)
 ├── speech.rs        # Whisper transcription + phrase matching
-└── notify.rs        # voip.ms SMS API integration with circuit breaker
+└── notify.rs        # Pushover push notification integration
 ```
 
 ## Key Data Flow
@@ -53,7 +52,7 @@ src/
 2. **RTP audio** ← G.711 encoded @ 8kHz
 3. **Decode** → PCM i16 → resample to 16kHz f32
 4. **Whisper** → transcribe → fuzzy match expected phrase
-5. **Alert** → voip.ms SMS API if phrase not found
+5. **Alert** → Pushover push notification if phrase not found
 
 ## Configuration
 
@@ -61,7 +60,7 @@ Copy `.env.example` to `.env` and configure:
 - SIP credentials (voip.ms sub-account)
 - Target phone number
 - Expected phrase
-- SMS alert settings
+- Pushover notification settings
 - Whisper model path (download GGML models from HuggingFace)
 
 ## Dependencies
