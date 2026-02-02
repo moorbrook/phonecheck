@@ -136,7 +136,6 @@ async fn main() -> Result<()> {
     // Initialize speech recognizer (Mutex for interior mutability - embedding model needs &mut)
     let recognizer = Arc::new(Mutex::new(SpeechRecognizer::new(
         &config.whisper_model_path,
-        config.expected_phrase.clone(),
     )?));
 
     // Initialize notifier
@@ -243,20 +242,24 @@ async fn run_check(
     }
 
     // Check audio with speech recognition
-    let check_result = match recognizer.lock() {
-        Ok(mut rec) => match rec.check_audio(&call_result.audio_samples) {
-            Ok(result) => result,
+    // Note: Lock is released before any .await to avoid holding MutexGuard across await points
+    let check_result = {
+        let result = match recognizer.lock() {
+            Ok(mut rec) => rec.check_audio(&call_result.audio_samples),
+            Err(e) => {
+                error!("Failed to lock recognizer: {}", e);
+                health_metrics.record_failure();
+                return;
+            }
+        };
+        match result {
+            Ok(r) => r,
             Err(e) => {
                 error!("Speech recognition failed: {}", e);
                 health_metrics.record_failure();
                 send_alert(notifier, &format!("PhoneCheck ALERT: Speech recognition failed - {}", e)).await;
                 return;
             }
-        },
-        Err(e) => {
-            error!("Failed to lock recognizer: {}", e);
-            health_metrics.record_failure();
-            return;
         }
     };
 

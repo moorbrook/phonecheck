@@ -1,5 +1,5 @@
-/// Health check HTTP endpoint
-/// Provides a simple /health endpoint for monitoring systems (Kubernetes, load balancers, etc.)
+//! Health check HTTP endpoint
+//! Provides a simple /health endpoint for monitoring systems (Kubernetes, load balancers, etc.)
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};

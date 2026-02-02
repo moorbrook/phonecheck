@@ -1,5 +1,5 @@
-/// Business hours scheduler
-/// Runs checks hourly between 8am and 5pm Pacific time, 7 days a week
+//! Business hours scheduler
+//! Runs checks hourly between 8am and 5pm Pacific time, 7 days a week
 
 use chrono::{TimeZone, Timelike};
 use chrono_tz::America::Los_Angeles;

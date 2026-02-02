@@ -17,8 +17,6 @@ const REFERENCE_EMBEDDING_PATH: &str = "./models/reference_embedding.bin";
 
 pub struct SpeechRecognizer {
     ctx: WhisperContext,
-    #[allow(dead_code)]
-    expected_phrase: String,
     /// Wav2Vec2 embedder for semantic audio matching
     embedder: Option<AudioEmbedder>,
     /// Pre-computed reference embedding for expected phrase audio
@@ -28,7 +26,7 @@ pub struct SpeechRecognizer {
 }
 
 impl SpeechRecognizer {
-    pub fn new(model_path: &str, expected_phrase: String) -> Result<Self> {
+    pub fn new(model_path: &str) -> Result<Self> {
         info!("Loading Whisper model from: {}", model_path);
 
         if !std::path::Path::new(model_path).exists() {
@@ -67,7 +65,6 @@ impl SpeechRecognizer {
 
         Ok(Self {
             ctx,
-            expected_phrase: expected_phrase.to_lowercase(),
             embedder,
             reference_embedding,
             similarity_threshold: DEFAULT_SIMILARITY_THRESHOLD,

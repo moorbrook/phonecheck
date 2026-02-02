@@ -1,5 +1,5 @@
-/// SIP message building utilities
-/// Reference: RFC 3261 - SIP: Session Initiation Protocol
+//! SIP message building utilities
+//! Reference: RFC 3261 - SIP: Session Initiation Protocol
 
 use rand::Rng;
 use std::net::SocketAddr;

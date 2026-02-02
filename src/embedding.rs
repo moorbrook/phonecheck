@@ -1,7 +1,7 @@
-/// Audio embedding using Wav2Vec2 via ONNX Runtime
-///
-/// Provides semantic audio embeddings that capture both phonetic and semantic similarity.
-/// "thanks for calling" and "thank you for calling" will have high similarity scores.
+//! Audio embedding using Wav2Vec2 via ONNX Runtime
+//!
+//! Provides semantic audio embeddings that capture both phonetic and semantic similarity.
+//! "thanks for calling" and "thank you for calling" will have high similarity scores.
 
 use anyhow::{Context, Result};
 use ndarray::Axis;
