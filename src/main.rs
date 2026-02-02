@@ -1,4 +1,5 @@
 mod config;
+mod embedding;
 mod health;
 mod notify;
 mod redact;
@@ -11,7 +12,7 @@ mod stun;
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::fs::File;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -28,6 +29,7 @@ struct Args {
     once: bool,
     validate: bool,
     help: bool,
+    save_audio: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -36,15 +38,26 @@ fn parse_args() -> Args {
         once: false,
         validate: false,
         help: false,
+        save_audio: None,
     };
 
-    for arg in args.iter().skip(1) {
-        match arg.as_str() {
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
             "--once" => result.once = true,
             "--validate" => result.validate = true,
             "--help" | "-h" => result.help = true,
+            "--save-audio" => {
+                if i + 1 < args.len() {
+                    i += 1;
+                    result.save_audio = Some(args[i].clone());
+                } else {
+                    result.save_audio = Some("captured_audio.wav".to_string());
+                }
+            }
             _ => {}
         }
+        i += 1;
     }
 
     result
@@ -55,9 +68,10 @@ fn print_help() {
     println!("USAGE:");
     println!("    phonecheck [OPTIONS]\n");
     println!("OPTIONS:");
-    println!("    --once              Run a single check and exit");
-    println!("    --validate          Validate configuration and exit");
-    println!("    --help, -h          Show this help message\n");
+    println!("    --once                  Run a single check and exit");
+    println!("    --validate              Validate configuration and exit");
+    println!("    --save-audio [PATH]     Save captured audio to WAV file (default: captured_audio.wav)");
+    println!("    --help, -h              Show this help message\n");
     println!("ENVIRONMENT:");
     println!("    See .env.example for required configuration variables");
 }
@@ -119,11 +133,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Initialize speech recognizer
-    let recognizer = Arc::new(SpeechRecognizer::new(
+    // Initialize speech recognizer (Mutex for interior mutability - embedding model needs &mut)
+    let recognizer = Arc::new(Mutex::new(SpeechRecognizer::new(
         &config.whisper_model_path,
         config.expected_phrase.clone(),
-    )?);
+    )?));
 
     // Initialize notifier
     let notifier = Arc::new(Notifier::new(&config));
@@ -149,7 +163,7 @@ async fn main() -> Result<()> {
     if args.once {
         info!("Running single check (--once mode)");
         let cancel_token = CancellationToken::new();
-        run_check(&config, &recognizer, &notifier, &health_metrics, cancel_token).await;
+        run_check(&config, recognizer.as_ref(), &notifier, &health_metrics, cancel_token, args.save_audio.as_deref()).await;
         health_cancel.cancel();
         return Ok(());
     }
@@ -161,7 +175,7 @@ async fn main() -> Result<()> {
         let notifier = notifier.clone();
         let health_metrics = health_metrics.clone();
         async move {
-            run_check(&config, &recognizer, &notifier, &health_metrics, cancel_token).await;
+            run_check(&config, recognizer.as_ref(), &notifier, &health_metrics, cancel_token, None).await;
         }
     })
     .await;
@@ -173,10 +187,11 @@ async fn main() -> Result<()> {
 
 async fn run_check(
     config: &Config,
-    recognizer: &SpeechRecognizer,
+    recognizer: &Mutex<SpeechRecognizer>,
     notifier: &Notifier,
     health_metrics: &HealthMetrics,
     cancel_token: CancellationToken,
+    save_audio_path: Option<&str>,
 ) {
     info!("Starting PBX health check...");
 
@@ -219,26 +234,45 @@ async fn run_check(
         return;
     }
 
+    // Save audio to file if requested
+    if let Some(path) = save_audio_path {
+        match rtp::save_wav(&call_result.audio_samples, path) {
+            Ok(()) => info!("Saved audio to: {}", path),
+            Err(e) => warn!("Failed to save audio: {}", e),
+        }
+    }
+
     // Check audio with speech recognition
-    let check_result = match recognizer.check_audio(&call_result.audio_samples) {
-        Ok(result) => result,
+    let check_result = match recognizer.lock() {
+        Ok(mut rec) => match rec.check_audio(&call_result.audio_samples) {
+            Ok(result) => result,
+            Err(e) => {
+                error!("Speech recognition failed: {}", e);
+                health_metrics.record_failure();
+                send_alert(notifier, &format!("PhoneCheck ALERT: Speech recognition failed - {}", e)).await;
+                return;
+            }
+        },
         Err(e) => {
-            error!("Speech recognition failed: {}", e);
+            error!("Failed to lock recognizer: {}", e);
             health_metrics.record_failure();
-            send_alert(notifier, &format!("PhoneCheck ALERT: Speech recognition failed - {}", e)).await;
             return;
         }
     };
 
     info!("Transcribed: \"{}\"", check_result.transcript);
+    if let Some(similarity) = check_result.similarity {
+        info!("Embedding similarity: {:.4}", similarity);
+    }
 
     if check_result.phrase_found {
         info!("SUCCESS: Expected phrase detected - PBX is healthy");
         health_metrics.record_success();
     } else {
         warn!(
-            "ALERT: Expected phrase NOT detected. Heard: \"{}\"",
-            check_result.transcript
+            "ALERT: Expected phrase NOT detected. Heard: \"{}\", similarity: {:?}",
+            check_result.transcript,
+            check_result.similarity
         );
         health_metrics.record_failure();
         send_alert(

@@ -3,6 +3,7 @@
 //! This module exports internal components for integration testing.
 
 pub mod config;
+pub mod embedding;
 pub mod notify;
 pub mod redact;
 pub mod rtp;

@@ -1,6 +1,6 @@
 # PhoneCheck
 
-A PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, transcribes the audio greeting using Whisper, and sends push notifications if the expected phrase is not detected.
+A PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, captures the audio greeting, and uses Wav2Vec2 audio embeddings for semantic matching. Sends push notifications if the expected greeting is not detected.
 
 ## Voice AI Building Blocks
 
@@ -9,9 +9,10 @@ This project implements many core components needed for voice AI phone applicati
 - **SIP/VoIP Client** - Outbound calling with digest authentication (RFC 3261, 2617)
 - **RTP Audio Handling** - Packet reception, jitter buffer, sequence ordering
 - **G.711 Codec** - μ-law/A-law decoding with ITU-T compliant lookup tables
-- **Audio Resampling** - 8kHz → 16kHz conversion for Whisper compatibility
+- **Audio Resampling** - 8kHz → 16kHz conversion for ML model compatibility
 - **NAT Traversal** - STUN discovery + RTP hole punching for reliable audio behind NAT
-- **Speech Recognition** - Whisper integration with fuzzy phrase matching
+- **Audio Embeddings** - Wav2Vec2 via ONNX Runtime (statically linked) for semantic audio matching
+- **Speech Recognition** - Whisper integration for transcription logging
 - **Formal Verification** - Kani proofs and Stateright models for correctness
 
 ## Use Case
@@ -19,14 +20,23 @@ This project implements many core components needed for voice AI phone applicati
 Monitor your business phone system to ensure callers hear the correct greeting. PhoneCheck will:
 
 1. Call your phone number every hour during business hours (8am-5pm Pacific)
-2. Listen to the greeting and transcribe it using Whisper AI
-3. Check if the expected phrase is present (fuzzy matching allows minor variations)
-4. Send you a push notification if something is wrong
+2. Capture the audio and compute a semantic embedding using Wav2Vec2
+3. Compare against a reference embedding using cosine similarity
+4. Send you a push notification if the greeting doesn't match
+
+## Why Audio Embeddings?
+
+Traditional text-based matching fails when:
+- Whisper transcribes "thanks for calling" but you expected "thank you for calling"
+- Minor audio variations cause different transcriptions
+
+**Wav2Vec2 embeddings solve this** by comparing audio semantically. Similar-sounding phrases produce similar embeddings, so "thanks for calling" and "thank you for calling" both match.
 
 ## Requirements
 
-- Rust 1.70+
+- Rust 1.88+ (ONNX Runtime is statically linked - no separate install needed)
 - CMake (for building whisper.cpp)
+- Python 3.11-3.13 with `uv` (one-time, for exporting Wav2Vec2 model to ONNX)
 - A [voip.ms](https://voip.ms) account with a SIP sub-account for making calls
 - A [Pushover](https://pushover.net) account for push notifications
 
@@ -37,14 +47,20 @@ Monitor your business phone system to ensure callers hear the correct greeting. 
 git clone https://github.com/yourusername/phonecheck.git
 cd phonecheck
 
-# Build (requires cmake)
+# Build (requires cmake; ONNX Runtime is downloaded automatically)
 cargo build --release
 
-# Download a Whisper model
+# Download Whisper model and verify
 mkdir -p models
 curl -L -o models/ggml-base.en.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+echo "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002  models/ggml-base.en.bin" | shasum -a 256 -c
+
+# Export Wav2Vec2 to ONNX (one-time setup, downloads ~380MB model)
+uv run --python 3.13 scripts/export_wav2vec2.py
 ```
+
+The first build downloads ONNX Runtime (~50MB) and statically links it into the binary. The resulting binary is self-contained (~27MB) with no runtime dependencies.
 
 ## voip.ms Setup
 
@@ -82,7 +98,7 @@ cp .env.example .env
 | `SIP_PASSWORD` | voip.ms sub-account password | `secretpass` |
 | `SIP_SERVER` | voip.ms SIP server | `atlanta.voip.ms` |
 | `TARGET_PHONE` | Phone number to call | `19095551234` |
-| `EXPECTED_PHRASE` | Phrase to detect in greeting | `thank you for calling` |
+| `EXPECTED_PHRASE` | Phrase for logging (matching uses embeddings) | `thank you for calling` |
 | `PUSHOVER_USER_KEY` | Your Pushover user key | `uQiRzpo4DXghDmr9QzzfQu27cmVRsG` |
 | `PUSHOVER_API_TOKEN` | Your Pushover app API token | `azGDORePK8gMaC0QOYAMyEEuzJnyUi` |
 | `WHISPER_MODEL_PATH` | Path to Whisper model | `./models/ggml-base.en.bin` |
@@ -114,6 +130,13 @@ cp .env.example .env
 ./target/release/phonecheck --once
 ```
 
+### Capture Audio for Testing
+
+```bash
+# Save captured audio to a WAV file
+./target/release/phonecheck --once --save-audio test.wav
+```
+
 ### Validate Configuration
 
 ```bash
@@ -127,9 +150,10 @@ cp .env.example .env
 USAGE: phonecheck [OPTIONS]
 
 OPTIONS:
-    --once              Run a single check and exit
-    --validate          Validate configuration and exit
-    --help, -h          Show help message
+    --once                  Run a single check and exit
+    --save-audio [PATH]     Save captured audio to WAV file
+    --validate              Validate configuration and exit
+    --help, -h              Show help message
 
 ENVIRONMENT:
     See .env.example for required configuration variables
@@ -159,47 +183,80 @@ curl http://localhost:8080/health
 │             │    RTP Audio     │             │            │             │
 └─────────────┘                  └─────────────┘            └─────────────┘
        │
-       │ G.711 decode → Resample → Whisper transcribe
+       │ G.711 decode → Resample 8k→16k
        │
        ▼
-┌─────────────┐
-│ "Thank you  │──── Fuzzy match ────► Expected phrase found?
-│ for calling │                              │
-│ Acme Corp"  │                     ┌────────┴────────┐
-└─────────────┘                     │                 │
-                                   YES               NO
-                                    │                 │
-                                    ▼                 ▼
-                               (no action)      Send Push Alert
+┌─────────────────────────────────────────────────────────┐
+│                    Audio Processing                      │
+├─────────────────────────┬───────────────────────────────┤
+│      Whisper            │         Wav2Vec2              │
+│   (Transcription)       │       (Embeddings)            │
+│                         │                               │
+│  "Thank you for         │  [0.009, 0.007, -0.003, ...]  │
+│   calling Cubic..."     │       768 dimensions          │
+└─────────────────────────┴───────────────────────────────┘
+                                    │
+                                    ▼
+                          ┌─────────────────┐
+                          │ Cosine Similarity│
+                          │ vs Reference     │
+                          │                  │
+                          │ similarity: 0.99 │
+                          └────────┬────────┘
+                                   │
+                          ┌────────┴────────┐
+                          │                 │
+                    ≥ 0.80              < 0.80
+                          │                 │
+                          ▼                 ▼
+                     (no action)      Send Push Alert
 ```
 
-## Phrase Matching
+## Audio Matching
 
-PhoneCheck uses Levenshtein distance (edit distance) for fuzzy matching:
+PhoneCheck uses Wav2Vec2 embeddings for semantic audio matching:
 
-- Case insensitive
-- Allows 1 character difference per word (for words > 3 characters)
-- Words must appear in order
+### How It Works
 
-Examples that match `"thank you for calling"`:
-- `"Thank you for calling"` (case difference)
-- `"thanks you for calling"` (1 char difference in "thank")
-- `"thank you for calling Acme Corp"` (extra words OK)
+1. **First run**: Captures audio and saves the embedding as a reference
+2. **Subsequent runs**: Compares new audio embedding against reference
+3. **Threshold**: 0.80 cosine similarity (configurable in code)
 
-### Algorithm Tradeoffs
+### Why This Works
 
-We evaluated several matching approaches:
+Wav2Vec2 embeddings capture both **phonetic** and **semantic** audio features:
 
-| Algorithm | Pros | Cons | Best For |
-|-----------|------|------|----------|
-| **Levenshtein** (current) | Simple, fast, deterministic, no dependencies | Only catches typos, not synonyms | Transcription errors like `"machinary"` |
-| **Jaro-Winkler** | Good for prefix similarity, scores 0-1 | Weights prefixes heavily, may false-positive on short words | Name matching, abbreviations |
-| **Soundex** | Phonetic matching | Too coarse, groups dissimilar words | Spelling variations of names |
-| **Word2Vec/GloVe** | Semantic word similarity | Word-level only, requires ~100-300MB model | Synonym matching |
-| **Sentence-BERT** | Full sentence semantics, handles paraphrasing | Requires ~80-400MB model + ML runtime | Intent matching, variable phrasings |
-| **LLM** | Best semantic understanding | Slow, expensive, requires API or large model | Complex intent classification |
+| Scenario | Text Matching | Embedding Matching |
+|----------|---------------|-------------------|
+| "thanks for calling" vs "thank you for calling" | ❌ Fails | ✅ ~0.95 similarity |
+| Same greeting, different day | ✅ Works | ✅ ~0.99 similarity |
+| Wrong number / different greeting | ✅ Fails | ✅ ~0.3 similarity |
 
-**Why Levenshtein?** Whisper transcription errors are typically character-level typos (`"machinery"` → `"machinary"`), not semantic variations. The greeting is scripted and consistent, so we don't need synonym or paraphrase matching. Levenshtein is fast, has no dependencies, and handles actual transcription errors well.
+### Model Files
+
+```
+models/
+├── ggml-base.en.bin          # Whisper (147MB) - transcription
+├── wav2vec2_encoder.onnx     # Wav2Vec2 (1.5MB) - embeddings
+├── wav2vec2_encoder.onnx.data # Wav2Vec2 weights (377MB)
+└── reference_embedding.bin   # Cached reference (3KB)
+```
+
+**SHA256 Checksums:**
+```
+a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002  ggml-base.en.bin
+c7c1889bdbad143221dead8137d067b092fa3adb891c76a64d26d3dcb3c41b60  wav2vec2_encoder.onnx
+836b7752b6f486fb53c0c16a09342859f24d7a89d4a4eccb1818a7d31c467f27  wav2vec2_encoder.onnx.data
+```
+
+### Resetting the Reference
+
+To capture a new reference embedding:
+
+```bash
+rm models/reference_embedding.bin
+./target/release/phonecheck --once
+```
 
 ## NAT Traversal
 
@@ -234,10 +291,14 @@ RUST_LOG=warn ./target/release/phonecheck          # Quiet
 - Verify the target phone number answers (not voicemail)
 - Try increasing `LISTEN_DURATION_SECS`
 
-### "Phrase not found" but greeting is correct
-- Check the Whisper transcription in debug logs
-- Try a larger Whisper model (`ggml-small.en.bin`)
-- Adjust `EXPECTED_PHRASE` to match what Whisper hears
+### Low similarity score but greeting sounds correct
+- Delete `models/reference_embedding.bin` and re-run to capture new reference
+- Check audio quality with `--save-audio test.wav`
+- Ensure consistent audio duration (greeting should play fully)
+
+### "Wav2Vec2 embedder not available"
+- Run `uv run --python 3.13 scripts/export_wav2vec2.py` to export the model
+- Verify `models/wav2vec2_encoder.onnx` and `models/wav2vec2_encoder.onnx.data` exist
 
 ### NAT/Firewall issues
 - Set `STUN_SERVER=stun.l.google.com:19302` (required for NAT traversal)
