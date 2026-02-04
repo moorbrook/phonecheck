@@ -173,21 +173,21 @@ proptest! {
     fn prop_from_getter_never_panics_with_arbitrary_port(port in malformed_port()) {
         let mut env = base_valid_config();
         env.insert("SIP_PORT", port);
-        let _ = Config::from_getter(|key| env.get(key).cloned());
+        let _ = Config::from_getter(|key| env.get(key.env_var()).cloned());
     }
 
     #[test]
     fn prop_from_getter_never_panics_with_arbitrary_phone(phone in dangerous_phone()) {
         let mut env = base_valid_config();
         env.insert("TARGET_PHONE", phone);
-        let _ = Config::from_getter(|key| env.get(key).cloned());
+        let _ = Config::from_getter(|key| env.get(key.env_var()).cloned());
     }
 
     #[test]
     fn prop_from_getter_never_panics_with_arbitrary_path(path in dangerous_path()) {
         let mut env = base_valid_config();
         env.insert("WHISPER_MODEL_PATH", path);
-        let _ = Config::from_getter(|key| env.get(key).cloned());
+        let _ = Config::from_getter(|key| env.get(key.env_var()).cloned());
     }
 
     #[test]
@@ -211,7 +211,7 @@ proptest! {
         env.insert("PUSHOVER_USER_KEY", "uQiRzpo4DXghDmr9QzzfQu27cmVRsG".to_string());
         env.insert("PUSHOVER_API_TOKEN", "azGDORePK8gMaC0QOYAMyEEuzJnyUi".to_string());
 
-        let _ = Config::from_getter(|key| env.get(key).cloned());
+        let _ = Config::from_getter(|key| env.get(key.env_var()).cloned());
     }
 }
 
@@ -225,7 +225,7 @@ proptest! {
         let mut env = base_valid_config();
         env.insert("EXPECTED_PHRASE", phrase.clone());
 
-        let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+        let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
         prop_assert_eq!(config.expected_phrase, phrase.to_lowercase());
     }
 }
@@ -249,7 +249,7 @@ fn test_missing_required_fields() {
         let mut env = base_valid_config();
         env.remove(field);
 
-        let result = Config::from_getter(|key| env.get(key).cloned());
+        let result = Config::from_getter(|key| env.get(key.env_var()).cloned());
         assert!(result.is_err(), "Missing {} should cause error", field);
 
         let err = result.unwrap_err().to_string();
@@ -273,8 +273,8 @@ fn test_empty_string_vs_missing() {
     let mut env_empty = base_valid_config();
     env_empty.insert("SIP_USERNAME", "".to_string());
 
-    let result_missing = Config::from_getter(|key| env_missing.get(key).cloned());
-    let result_empty = Config::from_getter(|key| env_empty.get(key).cloned());
+    let result_missing = Config::from_getter(|key| env_missing.get(key.env_var()).cloned());
+    let result_empty = Config::from_getter(|key| env_empty.get(key.env_var()).cloned());
 
     // Missing should definitely fail
     assert!(result_missing.is_err());
@@ -296,7 +296,7 @@ fn test_port_boundary_values() {
     for port in ["0", "1", "80", "443", "5060", "65535"] {
         let mut env = base_valid_config();
         env.insert("SIP_PORT", port.to_string());
-        let config = Config::from_getter(|key| env.get(key).cloned());
+        let config = Config::from_getter(|key| env.get(key.env_var()).cloned());
         assert!(
             config.is_ok(),
             "Port {} should be valid",
@@ -320,7 +320,7 @@ fn test_port_invalid_values() {
     for (port, should_succeed) in invalid_ports {
         let mut env = base_valid_config();
         env.insert("SIP_PORT", port.to_string());
-        let result = Config::from_getter(|key| env.get(key).cloned());
+        let result = Config::from_getter(|key| env.get(key.env_var()).cloned());
 
         if should_succeed {
             assert!(result.is_ok(), "Port '{}' should succeed", port);
@@ -355,7 +355,7 @@ fn test_duration_boundary_values() {
     for (input, expected, should_parse) in test_cases {
         let mut env = base_valid_config();
         env.insert("LISTEN_DURATION_SECS", input.to_string());
-        let result = Config::from_getter(|key| env.get(key).cloned());
+        let result = Config::from_getter(|key| env.get(key.env_var()).cloned());
 
         if should_parse {
             assert!(result.is_ok(), "Duration '{}' should parse", input);
@@ -374,7 +374,7 @@ fn test_duration_validation() {
     // Zero duration fails validation
     let mut env = base_valid_config();
     env.insert("LISTEN_DURATION_SECS", "0".to_string());
-    let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
     let result = config.validate();
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("LISTEN_DURATION"));
@@ -382,7 +382,7 @@ fn test_duration_validation() {
     // 301 (> 300) fails validation
     let mut env = base_valid_config();
     env.insert("LISTEN_DURATION_SECS", "301".to_string());
-    let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
     let result = config.validate();
     assert!(result.is_err());
 }
@@ -395,7 +395,7 @@ fn test_duration_validation() {
 fn test_very_long_username() {
     let mut env = base_valid_config();
     env.insert("SIP_USERNAME", "x".repeat(100000));
-    let config = Config::from_getter(|key| env.get(key).cloned());
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned());
     assert!(config.is_ok());
     assert_eq!(config.unwrap().sip_username.len(), 100000);
 }
@@ -404,7 +404,7 @@ fn test_very_long_username() {
 fn test_very_long_phrase() {
     let mut env = base_valid_config();
     env.insert("EXPECTED_PHRASE", "word ".repeat(10000));
-    let config = Config::from_getter(|key| env.get(key).cloned());
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned());
     assert!(config.is_ok());
 }
 
@@ -425,7 +425,7 @@ fn test_phone_valid_formats() {
     for phone in valid {
         let mut env = base_valid_config();
         env.insert("TARGET_PHONE", phone.to_string());
-        let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+        let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
         assert_eq!(config.target_phone, phone);
     }
 }
@@ -445,7 +445,7 @@ fn test_phone_invalid_formats_parsing() {
     for phone in phones {
         let mut env = base_valid_config();
         env.insert("TARGET_PHONE", phone.to_string());
-        let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+        let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
         // Verify config parses without panic
         assert_eq!(config.target_phone, phone);
     }
@@ -459,19 +459,19 @@ fn test_phone_invalid_formats_parsing() {
 fn test_stun_server_empty_vs_missing() {
     // Missing STUN_SERVER -> None
     let env = base_valid_config();
-    let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
     assert!(config.stun_server.is_none());
 
     // Empty string STUN_SERVER -> None (filtered by .filter(|s| !s.is_empty()))
     let mut env = base_valid_config();
     env.insert("STUN_SERVER", "".to_string());
-    let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
     assert!(config.stun_server.is_none());
 
     // Non-empty STUN_SERVER -> Some
     let mut env = base_valid_config();
     env.insert("STUN_SERVER", "stun.example.com:3478".to_string());
-    let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
     assert_eq!(config.stun_server, Some("stun.example.com:3478".to_string()));
 }
 
@@ -483,19 +483,19 @@ fn test_stun_server_empty_vs_missing() {
 fn test_health_port_optional() {
     // Missing -> None
     let env = base_valid_config();
-    let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
     assert!(config.health_port.is_none());
 
     // Valid port -> Some
     let mut env = base_valid_config();
     env.insert("HEALTH_PORT", "8080".to_string());
-    let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
     assert_eq!(config.health_port, Some(8080));
 
     // Invalid -> None (uses .and_then(|s| s.parse().ok()))
     let mut env = base_valid_config();
     env.insert("HEALTH_PORT", "invalid".to_string());
-    let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
     assert!(config.health_port.is_none());
 }
 
@@ -507,19 +507,19 @@ fn test_health_port_optional() {
 fn test_min_audio_duration_defaults() {
     // Missing -> 500 (default)
     let env = base_valid_config();
-    let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
     assert_eq!(config.min_audio_duration_ms, 500);
 
     // Valid value
     let mut env = base_valid_config();
     env.insert("MIN_AUDIO_DURATION_MS", "1000".to_string());
-    let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
     assert_eq!(config.min_audio_duration_ms, 1000);
 
     // Invalid -> 500 (default)
     let mut env = base_valid_config();
     env.insert("MIN_AUDIO_DURATION_MS", "invalid".to_string());
-    let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+    let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
     assert_eq!(config.min_audio_duration_ms, 500);
 }
 
@@ -531,8 +531,8 @@ fn test_min_audio_duration_defaults() {
 fn test_config_parsing_deterministic() {
     let env = base_valid_config();
 
-    let config1 = Config::from_getter(|key| env.get(key).cloned()).unwrap();
-    let config2 = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+    let config1 = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
+    let config2 = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
 
     assert_eq!(config1.sip_username, config2.sip_username);
     assert_eq!(config1.sip_port, config2.sip_port);

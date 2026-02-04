@@ -4,6 +4,8 @@
 
 pub mod config;
 pub mod embedding;
+pub mod health;
+pub mod model_manager;
 pub mod notify;
 pub mod redact;
 pub mod rtp;

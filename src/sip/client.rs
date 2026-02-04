@@ -23,14 +23,18 @@ use crate::rtp::RtpReceiver;
 
 /// SIP client for making outbound calls
 pub struct SipClient {
-    config: Config,
+    config: std::sync::Arc<Config>,
     server_addr: SocketAddr,
     /// Public address discovered via STUN (if configured)
     public_addr: Option<std::net::IpAddr>,
+    /// Cached SIP URIs (computed once on construction)
+    from_uri: String,
+    target_uri: String,
+    display_name: String,
 }
 
 /// Result of a phone check call
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CallResult {
     pub connected: bool,
     pub audio_received: bool,
@@ -38,6 +42,41 @@ pub struct CallResult {
     pub error: Option<String>,
     /// SIP status code if call was rejected
     pub sip_status: Option<u16>,
+}
+
+impl CallResult {
+    /// Create a successful call result with audio
+    pub fn success(audio_samples: Vec<f32>, audio_received: bool) -> Self {
+        Self {
+            connected: true,
+            audio_received,
+            audio_samples,
+            error: None,
+            sip_status: Some(200),
+        }
+    }
+
+    /// Create a failed call result with an error message
+    pub fn failed(error: String) -> Self {
+        Self::default().with_error(error)
+    }
+
+    /// Create a failed call result with a SIP status code
+    pub fn failed_with_status(status: u16, error: String) -> Self {
+        Self::default().with_status(status).with_error(error)
+    }
+
+    /// Add an error message to a default call result
+    fn with_error(mut self, error: String) -> Self {
+        self.error = Some(error);
+        self
+    }
+
+    /// Add a SIP status code to a default call result
+    fn with_status(mut self, status: u16) -> Self {
+        self.sip_status = Some(status);
+        self
+    }
 }
 
 /// Classify SIP error codes for better error handling and reporting
@@ -103,7 +142,7 @@ impl SipErrorCategory {
 
 impl SipClient {
     /// Create a new SIP client
-    pub async fn new(config: Config) -> Result<Self> {
+    pub async fn new(config: std::sync::Arc<Config>) -> Result<Self> {
         // Resolve SIP server address
         let server_host = format!("{}:{}", config.sip_server, config.sip_port);
         let server_addr = lookup_host(&server_host)
@@ -131,10 +170,18 @@ impl SipClient {
             None
         };
 
+        // Cache SIP URIs for reuse across calls
+        let from_uri = format!("sip:{}@{}", config.sip_username, config.sip_server);
+        let target_uri = format!("sip:{}@{}", config.target_phone, config.sip_server);
+        let display_name = "PhoneCheck".to_string();
+
         Ok(Self {
             config,
             server_addr,
             public_addr,
+            from_uri,
+            target_uri,
+            display_name,
         })
     }
 
@@ -160,10 +207,12 @@ impl SipClient {
         listen_duration: Duration,
         rtp_port_hint: u16,
     ) -> Result<CallResult> {
-        // No cancellation - create a dummy token that never cancels
-        let cancel_token = CancellationToken::new();
-        self.make_test_call_on_port_cancellable(listen_duration, rtp_port_hint, cancel_token)
-            .await
+        self.make_test_call_on_port_cancellable(
+            listen_duration,
+            rtp_port_hint,
+            CancellationToken::new(),
+        )
+        .await
     }
 
     /// Make a test call on a specific RTP port with cancellation support
@@ -197,11 +246,6 @@ impl SipClient {
         // Generate call identifiers
         let call_id = generate_call_id(&local_addr.ip().to_string());
         let from_tag = generate_tag();
-        let from_uri = format!(
-            "sip:{}@{}",
-            self.config.sip_username, self.config.sip_server
-        );
-        let target_uri = format!("sip:{}@{}", self.config.target_phone, self.config.sip_server);
 
         info!("Initiating call to {}", self.config.target_phone);
 
@@ -213,9 +257,9 @@ impl SipClient {
         // Build and send initial INVITE
         let mut cseq = 1u32;
         let invite = build_invite(
-            &target_uri,
-            &from_uri,
-            "PhoneCheck",
+            &self.target_uri,
+            &self.from_uri,
+            &self.display_name,
             &call_id,
             &from_tag,
             cseq,
@@ -228,13 +272,7 @@ impl SipClient {
         let mut response = match transport.send_invite_await_final(&invite).await {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallResult {
-                    connected: false,
-                    audio_received: false,
-                    audio_samples: Vec::new(),
-                    error: Some(format!("No response from server: {}", e)),
-                    sip_status: None,
-                });
+                return Ok(CallResult::failed(format!("No response from server: {}", e)));
             }
         };
 
@@ -250,13 +288,7 @@ impl SipClient {
                     status_code
                 );
                 tracing::error!("{}", error_msg);
-                return Ok(CallResult {
-                    connected: false,
-                    audio_received: false,
-                    audio_samples: Vec::new(),
-                    error: Some(error_msg),
-                    sip_status: Some(status_code),
-                });
+                return Ok(CallResult::failed_with_status(status_code, error_msg));
             }
 
             // Extract and parse the challenge
@@ -265,13 +297,10 @@ impl SipClient {
                 None => {
                     let error_msg = "Server sent 401/407 but no WWW-Authenticate header found";
                     tracing::error!("{}", error_msg);
-                    return Ok(CallResult {
-                        connected: false,
-                        audio_received: false,
-                        audio_samples: Vec::new(),
-                        error: Some(error_msg.to_string()),
-                        sip_status: Some(status_code),
-                    });
+                    return Ok(CallResult::failed_with_status(
+                        status_code,
+                        error_msg.to_string(),
+                    ));
                 }
             };
 
@@ -283,13 +312,7 @@ impl SipClient {
                         auth_header
                     );
                     tracing::error!("{}", error_msg);
-                    return Ok(CallResult {
-                        connected: false,
-                        audio_received: false,
-                        audio_samples: Vec::new(),
-                        error: Some(error_msg),
-                        sip_status: Some(status_code),
-                    });
+                    return Ok(CallResult::failed_with_status(status_code, error_msg));
                 }
             };
 
@@ -303,10 +326,10 @@ impl SipClient {
                 extract_via_branch(&response).unwrap_or_else(|| "z9hG4bKunknown".to_string());
             let to_tag = extract_to_tag(&response);
             let ack = build_ack(
-                &target_uri,
-                &from_uri,
-                "PhoneCheck",
-                &target_uri,
+                &self.target_uri,
+                &self.from_uri,
+                &self.display_name,
+                &self.target_uri,
                 to_tag.as_deref(),
                 &call_id,
                 &from_tag,
@@ -322,16 +345,16 @@ impl SipClient {
                 &self.config.sip_username,
                 &self.config.sip_password,
                 "INVITE",
-                &target_uri,
+                &self.target_uri,
             );
             let authorization = digest_response.to_header();
 
             // Rebuild INVITE with Authorization header and incremented CSeq
             cseq += 1;
             let auth_invite = build_invite_with_auth(
-                &target_uri,
-                &from_uri,
-                "PhoneCheck",
+                &self.target_uri,
+                &self.from_uri,
+                &self.display_name,
                 &call_id,
                 &from_tag,
                 cseq,
@@ -345,13 +368,10 @@ impl SipClient {
             response = match transport.send_invite_await_final(&auth_invite).await {
                 Ok(r) => r,
                 Err(e) => {
-                    return Ok(CallResult {
-                        connected: false,
-                        audio_received: false,
-                        audio_samples: Vec::new(),
-                        error: Some(format!("No response after authentication: {}", e)),
-                        sip_status: None,
-                    });
+                    return Ok(CallResult::failed(format!(
+                        "No response after authentication: {}",
+                        e
+                    )));
                 }
             };
 
@@ -375,13 +395,7 @@ impl SipClient {
                 tracing::error!("{}", error_msg);
             }
 
-            return Ok(CallResult {
-                connected: false,
-                audio_received: false,
-                audio_samples: Vec::new(),
-                error: Some(error_msg),
-                sip_status: Some(status_code),
-            });
+            return Ok(CallResult::failed_with_status(status_code, error_msg));
         }
 
         // Extract To tag for dialog
@@ -390,10 +404,10 @@ impl SipClient {
 
         // Send ACK
         let ack = build_ack(
-            &target_uri,
-            &from_uri,
-            "PhoneCheck",
-            &target_uri,
+            &self.target_uri,
+            &self.from_uri,
+            &self.display_name,
+            &self.target_uri,
             to_tag.as_deref(),
             &call_id,
             &from_tag,
@@ -422,7 +436,7 @@ impl SipClient {
         let audio_samples = rtp_receiver.get_samples_f32();
 
         // Calculate audio duration in ms (16kHz sample rate after resampling)
-        let audio_duration_ms = (audio_samples.len() as u64 * 1000) / 16000;
+        let audio_duration_ms = crate::rtp::samples_to_duration_ms(audio_samples.len());
 
         // Check if we have enough audio (not just noise/glitches)
         let audio_received = audio_duration_ms >= self.config.min_audio_duration_ms;
@@ -431,29 +445,29 @@ impl SipClient {
             info!(
                 "Call cancelled during audio receive - collected {} samples ({:.1}s)",
                 audio_samples.len(),
-                audio_samples.len() as f32 / 16000.0
+                audio_samples.len() as f32 / crate::rtp::WHISPER_SAMPLE_RATE as f32
             );
         } else if !audio_samples.is_empty() && !audio_received {
             warn!(
                 "Received {} audio samples ({:.1}s) but below minimum threshold ({}ms)",
                 audio_samples.len(),
-                audio_samples.len() as f32 / 16000.0,
+                audio_samples.len() as f32 / crate::rtp::WHISPER_SAMPLE_RATE as f32,
                 self.config.min_audio_duration_ms
             );
         } else {
             info!(
                 "Received {} audio samples ({:.1}s)",
                 audio_samples.len(),
-                audio_samples.len() as f32 / 16000.0
+                audio_samples.len() as f32 / crate::rtp::WHISPER_SAMPLE_RATE as f32
             );
         }
 
         // Always send BYE to end call cleanly (even on cancellation)
         let bye = build_bye(
-            &target_uri,
-            &from_uri,
-            "PhoneCheck",
-            &target_uri,
+            &self.target_uri,
+            &self.from_uri,
+            &self.display_name,
+            &self.target_uri,
             to_tag.as_deref(),
             &call_id,
             &from_tag,
@@ -495,17 +509,15 @@ impl SipClient {
 
         // If cancelled, return partial result but mark as connected
         // The caller can decide whether to use the partial audio
-        Ok(CallResult {
-            connected: true,
-            audio_received: audio_received && completed_normally,
-            audio_samples,
-            error: if completed_normally {
-                None
-            } else {
-                Some("Call cancelled by shutdown".to_string())
-            },
-            sip_status: Some(200),
-        })
+        let audio_received = audio_received && completed_normally;
+        if completed_normally {
+            Ok(CallResult::success(audio_samples, audio_received))
+        } else {
+            // Partial result due to cancellation
+            let mut result = CallResult::success(audio_samples, audio_received);
+            result.error = Some("Call cancelled by shutdown".to_string());
+            Ok(result)
+        }
     }
 }
 

@@ -271,12 +271,14 @@ impl Model for SipCallChecker {
             }
 
             SipAction::SendAuthenticatedInvite => {
-                if state.state == CallState::Authenticating && state.has_password {
-                    next.state = CallState::InvitingWithAuth { retries: 0 };
-                    next.auth_attempted = true;
-                } else if state.state == CallState::Authenticating && !state.has_password {
-                    // No password configured - fail
-                    next.state = CallState::Failed;
+                if state.state == CallState::Authenticating {
+                    if state.has_password {
+                        next.state = CallState::InvitingWithAuth { retries: 0 };
+                        next.auth_attempted = true;
+                    } else {
+                        // No password configured - should fail
+                        next.state = CallState::Failed;
+                    }
                 }
             }
 

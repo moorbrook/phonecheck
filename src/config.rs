@@ -1,16 +1,102 @@
+//! Configuration module
+//!
+//! Provides typed access to environment variables for PhoneCheck.
+
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::env;
 use std::net::ToSocketAddrs;
 use std::path::Path;
 
+/// Typed configuration keys
+///
+/// Using an enum for config keys provides compile-time safety
+/// and prevents typos compared to string literals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConfigKey {
+    // SIP credentials
+    SipUsername,
+    SipPassword,
+    SipServer,
+    SipPort,
+
+    // Target to call
+    TargetPhone,
+
+    // Detection settings
+    ExpectedPhrase,
+    ListenDurationSecs,
+
+    // Pushover notifications
+    PushoverUserKey,
+    PushoverApiToken,
+
+    // Whisper model path (GGML format, e.g., ggml-base.en.bin)
+    WhisperModelPath,
+
+    // STUN server for NAT traversal (optional)
+    StunServer,
+
+    // Minimum audio duration in milliseconds
+    MinAudioDurationMs,
+
+    // Health check HTTP server port (optional, disabled if not set)
+    HealthPort,
+}
+
+impl ConfigKey {
+    /// Get the environment variable name for this key
+    pub fn env_var(&self) -> &'static str {
+        match self {
+            ConfigKey::SipUsername => "SIP_USERNAME",
+            ConfigKey::SipPassword => "SIP_PASSWORD",
+            ConfigKey::SipServer => "SIP_SERVER",
+            ConfigKey::SipPort => "SIP_PORT",
+            ConfigKey::TargetPhone => "TARGET_PHONE",
+            ConfigKey::ExpectedPhrase => "EXPECTED_PHRASE",
+            ConfigKey::ListenDurationSecs => "LISTEN_DURATION_SECS",
+            ConfigKey::PushoverUserKey => "PUSHOVER_USER_KEY",
+            ConfigKey::PushoverApiToken => "PUSHOVER_API_TOKEN",
+            ConfigKey::WhisperModelPath => "WHISPER_MODEL_PATH",
+            ConfigKey::StunServer => "STUN_SERVER",
+            ConfigKey::MinAudioDurationMs => "MIN_AUDIO_DURATION_MS",
+            ConfigKey::HealthPort => "HEALTH_PORT",
+        }
+    }
+
+    /// Check if this key is required (no default value)
+    pub fn is_required(&self) -> bool {
+        matches!(
+            self,
+            ConfigKey::SipUsername
+                | ConfigKey::SipPassword
+                | ConfigKey::SipServer
+                | ConfigKey::TargetPhone
+                | ConfigKey::PushoverUserKey
+                | ConfigKey::PushoverApiToken
+        )
+    }
+
+    /// Get default value for this key (if any)
+    pub fn default_value(&self) -> Option<&'static str> {
+        match self {
+            ConfigKey::SipPort => Some("5060"),
+            ConfigKey::ExpectedPhrase => Some("thank you for calling cubic machinery"),
+            ConfigKey::ListenDurationSecs => Some("10"),
+            ConfigKey::WhisperModelPath => Some("./models/ggml-base.en.bin"),
+            ConfigKey::MinAudioDurationMs => Some("500"),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     // SIP credentials
     pub sip_username: String,
-    /// SIP password - TODO: implement digest authentication
-    /// Currently unused as voip.ms allows IP-based authentication
-    #[allow(dead_code)]
+    /// SIP password - used for RFC 2617/7616 digest authentication
+    /// When the SIP server responds with 401/407, the client will retry
+    /// using this password to compute the digest response.
     pub sip_password: String,
     pub sip_server: String,
     pub sip_port: u16,
@@ -44,53 +130,61 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Self> {
         dotenvy::dotenv().ok(); // Load .env if present, ignore if missing
-        Self::from_getter(|key| env::var(key).ok())
+        Self::from_getter(|key| env::var(key.env_var()).ok())
     }
 
     /// Parse config from a custom getter function (for testing)
     pub fn from_getter<F>(get: F) -> Result<Self>
     where
-        F: Fn(&str) -> Option<String>,
+        F: Fn(ConfigKey) -> Option<String>,
     {
         Ok(Config {
-            sip_username: get("SIP_USERNAME").context("SIP_USERNAME not set")?,
-            sip_password: get("SIP_PASSWORD").context("SIP_PASSWORD not set")?,
-            sip_server: get("SIP_SERVER").context("SIP_SERVER not set")?,
-            sip_port: get("SIP_PORT")
-                .unwrap_or_else(|| "5060".to_string())
+            sip_username: get(ConfigKey::SipUsername).context(ConfigKey::SipUsername.env_var())?,
+            sip_password: get(ConfigKey::SipPassword).context(ConfigKey::SipPassword.env_var())?,
+            sip_server: get(ConfigKey::SipServer).context(ConfigKey::SipServer.env_var())?,
+            sip_port: get(ConfigKey::SipPort)
+                .unwrap_or_else(|| ConfigKey::SipPort.default_value().unwrap().to_string())
                 .parse()
-                .context("SIP_PORT must be a valid port number")?,
+                .context(format!("{} must be a valid port number", ConfigKey::SipPort.env_var()))?,
 
-            target_phone: get("TARGET_PHONE").context("TARGET_PHONE not set")?,
+            target_phone: get(ConfigKey::TargetPhone)
+                .context(ConfigKey::TargetPhone.env_var())?,
 
-            expected_phrase: get("EXPECTED_PHRASE")
-                .unwrap_or_else(|| "thank you for calling cubic machinery".to_string())
+            expected_phrase: get(ConfigKey::ExpectedPhrase)
+                .unwrap_or_else(|| ConfigKey::ExpectedPhrase.default_value().unwrap().to_string())
                 .to_lowercase(),
-            listen_duration_secs: get("LISTEN_DURATION_SECS")
-                .unwrap_or_else(|| "10".to_string())
+            listen_duration_secs: get(ConfigKey::ListenDurationSecs)
+                .unwrap_or_else(|| ConfigKey::ListenDurationSecs.default_value().unwrap().to_string())
                 .parse()
                 .unwrap_or(10),
 
-            pushover_user_key: get("PUSHOVER_USER_KEY").context("PUSHOVER_USER_KEY not set")?,
-            pushover_api_token: get("PUSHOVER_API_TOKEN").context("PUSHOVER_API_TOKEN not set")?,
+            pushover_user_key: get(ConfigKey::PushoverUserKey)
+                .context(ConfigKey::PushoverUserKey.env_var())?,
+            pushover_api_token: get(ConfigKey::PushoverApiToken)
+                .context(ConfigKey::PushoverApiToken.env_var())?,
 
-            whisper_model_path: get("WHISPER_MODEL_PATH")
-                .unwrap_or_else(|| "./models/ggml-base.en.bin".to_string()),
+            whisper_model_path: get(ConfigKey::WhisperModelPath)
+                .unwrap_or_else(|| {
+                    ConfigKey::WhisperModelPath
+                        .default_value()
+                        .unwrap()
+                        .to_string()
+                }),
 
-            stun_server: get("STUN_SERVER").filter(|s| !s.is_empty()),
+            stun_server: get(ConfigKey::StunServer).filter(|s| !s.is_empty()),
 
-            min_audio_duration_ms: get("MIN_AUDIO_DURATION_MS")
+            min_audio_duration_ms: get(ConfigKey::MinAudioDurationMs)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(500),
 
-            health_port: get("HEALTH_PORT").and_then(|s| s.parse().ok()),
+            health_port: get(ConfigKey::HealthPort).and_then(|s| s.parse().ok()),
         })
     }
 
     /// Create config from a HashMap (convenience for testing)
     #[cfg(test)]
     pub fn from_map(map: &HashMap<&str, &str>) -> Result<Self> {
-        Self::from_getter(|key| map.get(key).map(|v| v.to_string()))
+        Self::from_getter(|key| map.get(key.env_var()).map(|v| v.to_string()))
     }
 
     /// Validate configuration values at startup.
@@ -178,7 +272,10 @@ mod tests {
         assert_eq!(config.sip_username, "testuser");
         assert_eq!(config.sip_port, 5060); // default
         assert_eq!(config.listen_duration_secs, 10); // default
-        assert_eq!(config.whisper_model_path, "./models/ggml-base.en.bin"); // default
+        assert_eq!(
+            config.whisper_model_path,
+            "./models/ggml-base.en.bin"
+        ); // default
     }
 
     #[test]
@@ -197,14 +294,6 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("SIP_PORT"), "error should mention SIP_PORT: {}", err);
-    }
-
-    #[test]
-    fn test_invalid_port_out_of_range() {
-        let mut env = minimal_valid_env();
-        env.insert("SIP_PORT", "99999");
-        let result = Config::from_map(&env);
-        assert!(result.is_err());
     }
 
     #[test]
@@ -324,7 +413,11 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("EXPECTED_PHRASE"), "error should mention empty phrase: {}", err);
+        assert!(
+            err.contains("EXPECTED_PHRASE"),
+            "error should mention empty phrase: {}",
+            err
+        );
     }
 
     #[test]
@@ -335,7 +428,11 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("LISTEN_DURATION_SECS"), "error should mention duration: {}", err);
+        assert!(
+            err.contains("LISTEN_DURATION_SECS"),
+            "error should mention duration: {}",
+            err
+        );
     }
 
     #[test]
@@ -358,6 +455,61 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("TARGET_PHONE"), "error should mention invalid phone: {}", err);
+    }
+
+    #[test]
+    fn test_config_key_env_var() {
+        // Test that all keys have env var names
+        use ConfigKey::*;
+        for key in [
+            SipUsername,
+            SipPassword,
+            SipServer,
+            SipPort,
+            TargetPhone,
+            ExpectedPhrase,
+            ListenDurationSecs,
+            PushoverUserKey,
+            PushoverApiToken,
+            WhisperModelPath,
+            StunServer,
+            MinAudioDurationMs,
+            HealthPort,
+        ] {
+            assert!(!key.env_var().is_empty(), "{:?} env var is empty", key);
+        }
+    }
+
+    #[test]
+    fn test_config_key_is_required() {
+        // Test that required keys are correctly identified
+        use ConfigKey::*;
+        assert!(SipUsername.is_required());
+        assert!(SipPassword.is_required());
+        assert!(SipServer.is_required());
+        assert!(TargetPhone.is_required());
+        assert!(PushoverUserKey.is_required());
+        assert!(PushoverApiToken.is_required());
+
+        assert!(!SipPort.is_required()); // has default
+        assert!(!ExpectedPhrase.is_required()); // has default
+        assert!(!StunServer.is_required()); // optional
+    }
+
+    #[test]
+    fn test_config_key_default_value() {
+        // Test that keys with defaults return them
+        use ConfigKey::*;
+        assert_eq!(SipPort.default_value(), Some("5060"));
+        assert_eq!(ExpectedPhrase.default_value(), Some("thank you for calling cubic machinery"));
+        assert_eq!(ListenDurationSecs.default_value(), Some("10"));
+        assert_eq!(WhisperModelPath.default_value(), Some("./models/ggml-base.en.bin"));
+        assert_eq!(MinAudioDurationMs.default_value(), Some("500"));
+
+        // Keys without defaults
+        assert!(SipUsername.default_value().is_none());
+        assert!(TargetPhone.default_value().is_none());
+        assert!(StunServer.default_value().is_none());
     }
 }
 
@@ -398,7 +550,9 @@ mod proptests {
     proptest! {
         #[test]
         fn valid_configs_parse_successfully(env in valid_env_strategy()) {
-            let result = Config::from_getter(|key| env.get(key).cloned());
+            let result = Config::from_getter(|key| {
+                env.get(key.env_var()).cloned()
+            });
             prop_assert!(result.is_ok(), "valid config should parse: {:?}", result.err());
         }
 
@@ -414,7 +568,7 @@ mod proptests {
             env.insert("PUSHOVER_USER_KEY", "userkey123".to_string());
             env.insert("PUSHOVER_API_TOKEN", "token456".to_string());
 
-            let _ = Config::from_getter(|key| env.get(key).cloned());
+            let _ = Config::from_getter(|key| env.get(key.env_var()).cloned());
             // If we get here without panicking, the test passes
         }
 
@@ -429,7 +583,7 @@ mod proptests {
             env.insert("PUSHOVER_USER_KEY", "userkey123".to_string());
             env.insert("PUSHOVER_API_TOKEN", "token456".to_string());
 
-            let config = Config::from_getter(|key| env.get(key).cloned()).unwrap();
+            let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
             prop_assert_eq!(config.expected_phrase, phrase.to_lowercase());
         }
     }

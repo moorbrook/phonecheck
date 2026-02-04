@@ -2,133 +2,96 @@
 ///
 /// Uses Whisper for transcription (logging/debugging) and Wav2Vec2 embeddings
 /// for semantic audio similarity matching.
+///
+/// Both Whisper and Wav2Vec2 models are loaded via the singleton ModelManager
+/// to ensure they are only loaded once per process and properly cleaned up.
 
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use crate::embedding::{AudioEmbedder, DEFAULT_SIMILARITY_THRESHOLD};
+use crate::model_manager::{ModelManager, REFERENCE_EMBEDDING_PATH};
 
-/// Default path for the Wav2Vec2 ONNX model
-const WAV2VEC2_MODEL_PATH: &str = "./models/wav2vec2_encoder.onnx";
+/// Default similarity threshold for embedding-based matching
+const SIMILARITY_THRESHOLD: f32 = DEFAULT_SIMILARITY_THRESHOLD;
 
-/// Default path for the reference embedding cache
-const REFERENCE_EMBEDDING_PATH: &str = "./models/reference_embedding.bin";
+/// Type alias for the singleton mutex type
+type ModelManagerMutex = &'static std::sync::Mutex<Option<ModelManager>>;
 
 pub struct SpeechRecognizer {
-    ctx: WhisperContext,
-    /// Wav2Vec2 embedder for semantic audio matching
-    embedder: Option<AudioEmbedder>,
+    /// Model path (stored for singleton access)
+    model_path: String,
     /// Pre-computed reference embedding for expected phrase audio
     reference_embedding: Option<Vec<f32>>,
-    /// Similarity threshold for embedding-based matching
-    similarity_threshold: f32,
 }
 
 impl SpeechRecognizer {
     pub fn new(model_path: &str) -> Result<Self> {
-        info!("Loading Whisper model from: {}", model_path);
+        info!("Initializing SpeechRecognizer (using singleton models)");
 
-        if !std::path::Path::new(model_path).exists() {
-            anyhow::bail!(
-                "Whisper model not found at '{}'. Download a GGML model from:\n\
-                 https://huggingface.co/ggerganov/whisper.cpp/tree/main\n\
-                 Recommended: ggml-base.en.bin for English (141 MB)",
-                model_path
-            );
+        // Initialize singleton model manager
+        // This loads Whisper and Wav2Vec2 models on first call
+        if ModelManager::get(model_path).is_none() {
+            anyhow::bail!("Failed to initialize ModelManager - check model files");
         }
 
-        let ctx = WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
-            .context(format!(
-                "Failed to load Whisper model from '{}'. Possible causes:\n\
-                 - Wrong model format (must be GGML .bin, not PyTorch .pt)\n\
-                 - Corrupted download (re-download the model)\n\
-                 - Insufficient memory (try a smaller model like ggml-tiny.en.bin)",
-                model_path
-            ))?;
+        // Load cached reference embedding if available
+        let reference_embedding = Self::load_cached_reference(model_path);
 
-        info!("Whisper model loaded successfully");
-
-        // Try to load Wav2Vec2 embedder for semantic matching
-        let embedder = Self::try_load_embedder();
-        let reference_embedding = Self::try_load_reference_embedding();
-
-        if embedder.is_some() {
-            if reference_embedding.is_some() {
-                info!("Wav2Vec2 embedding matching enabled with cached reference");
-            } else {
-                info!("Wav2Vec2 embedding matching enabled (reference will be captured on first successful check)");
-            }
-        } else {
-            warn!("Wav2Vec2 embedder not available - phrase matching will not work!");
+        if reference_embedding.is_some() {
+            info!("Using cached reference embedding for phrase matching");
         }
 
         Ok(Self {
-            ctx,
-            embedder,
+            model_path: model_path.to_string(),
             reference_embedding,
-            similarity_threshold: DEFAULT_SIMILARITY_THRESHOLD,
         })
     }
 
-    /// Try to load the Wav2Vec2 embedder, returns None if unavailable
-    fn try_load_embedder() -> Option<AudioEmbedder> {
-        let model_path = std::path::Path::new(WAV2VEC2_MODEL_PATH);
-        if !model_path.exists() {
-            debug!("Wav2Vec2 model not found at {:?}", model_path);
-            return None;
-        }
-
-        match AudioEmbedder::new(model_path) {
-            Ok(embedder) => Some(embedder),
-            Err(e) => {
-                warn!("Failed to load Wav2Vec2 embedder: {}", e);
-                None
-            }
-        }
+    /// Load cached reference embedding from disk
+    fn load_cached_reference(model_path: &str) -> Option<Vec<f32>> {
+        // Access singleton only for loading the reference (no models needed)
+        ModelManager::get(model_path)?;
+        ModelManager::load_reference_embedding()
     }
 
-    /// Try to load cached reference embedding
-    fn try_load_reference_embedding() -> Option<Vec<f32>> {
-        let path = std::path::Path::new(REFERENCE_EMBEDDING_PATH);
-        if !path.exists() {
-            return None;
-        }
+    /// Transcribe audio using Whisper (immutable access)
+    fn transcribe_audio(&self, audio_samples: &[f32]) -> Result<String> {
+        let guard = ModelManager::get(&self.model_path)
+            .and_then(|m: ModelManagerMutex| m.lock().ok())
+            .context("Failed to access ModelManager")?;
 
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                if bytes.len() % 4 != 0 {
-                    warn!("Invalid reference embedding file size");
-                    return None;
-                }
-                let floats: Vec<f32> = bytes
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                    .collect();
-                if floats.len() == 768 {
-                    info!("Loaded cached reference embedding ({} dimensions)", floats.len());
-                    Some(floats)
-                } else {
-                    warn!("Reference embedding has wrong dimension: {} (expected 768)", floats.len());
-                    None
-                }
-            }
-            Err(e) => {
-                warn!("Failed to read reference embedding: {}", e);
-                None
-            }
-        }
+        let model_manager = guard
+            .as_ref()
+            .context("ModelManager not initialized")?;
+
+        model_manager.transcribe(audio_samples)
     }
 
-    /// Save reference embedding to cache
-    fn save_reference_embedding(embedding: &[f32]) -> Result<()> {
-        let bytes: Vec<u8> = embedding
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
-        std::fs::write(REFERENCE_EMBEDDING_PATH, bytes)?;
-        info!("Saved reference embedding to {}", REFERENCE_EMBEDDING_PATH);
-        Ok(())
+    /// Check if embedder is available
+    fn has_embedder(&self) -> Result<bool> {
+        let guard = ModelManager::get(&self.model_path)
+            .and_then(|m: ModelManagerMutex| m.lock().ok())
+            .context("Failed to access ModelManager")?;
+
+        let model_manager = guard
+            .as_ref()
+            .context("ModelManager not initialized")?;
+
+        Ok(model_manager.has_embedder())
+    }
+
+    /// Compute embedding using Wav2Vec2 (mutable access)
+    fn compute_embedding(&mut self, audio_samples: &[f32]) -> Result<Vec<f32>> {
+        let mut guard = ModelManager::get(&self.model_path)
+            .and_then(|m: ModelManagerMutex| m.lock().ok())
+            .context("Failed to access ModelManager for embedding")?;
+
+        let model_manager = guard
+            .as_mut()
+            .context("ModelManager not initialized")?;
+
+        model_manager.embed(audio_samples)
     }
 
     /// Transcribe audio and check if expected phrase is present using embedding similarity
@@ -143,8 +106,19 @@ impl SpeechRecognizer {
         }
 
         // First, transcribe with Whisper for logging/debugging
-        let transcript = self.transcribe(audio_samples)?;
+        let transcript = self.transcribe_audio(audio_samples)?;
         debug!("Transcribed: {}", transcript);
+
+        // Check if embedder is available
+        let has_embedder = self.has_embedder()?;
+        if !has_embedder {
+            warn!("No Wav2Vec2 embedder available - phrase matching will not work!");
+            return Ok(CheckResult {
+                transcript,
+                phrase_found: false,
+                similarity: None,
+            });
+        }
 
         // Use embedding-based matching
         let (phrase_found, similarity) = self.check_embedding_similarity(audio_samples)?;
@@ -156,69 +130,28 @@ impl SpeechRecognizer {
         })
     }
 
-    /// Transcribe audio using Whisper
-    fn transcribe(&self, audio_samples: &[f32]) -> Result<String> {
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-
-        params.set_n_threads(4);
-        params.set_language(Some("en"));
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_suppress_nst(true);
-
-        let mut state = self
-            .ctx
-            .create_state()
-            .context("Failed to create Whisper state")?;
-
-        state
-            .full(params, audio_samples)
-            .context("Failed to run transcription")?;
-
-        let num_segments = state.full_n_segments();
-        let mut full_text = String::new();
-
-        for i in 0..num_segments {
-            if let Some(segment) = state.get_segment(i) {
-                if let Ok(text) = segment.to_str() {
-                    full_text.push_str(text);
-                    full_text.push(' ');
-                }
-            }
-        }
-
-        Ok(full_text.trim().to_string())
-    }
-
     /// Check audio similarity using Wav2Vec2 embeddings
-    fn check_embedding_similarity(&mut self, audio_samples: &[f32]) -> Result<(bool, Option<f32>)> {
-        let embedder = match &mut self.embedder {
-            Some(e) => e,
-            None => {
-                warn!("No Wav2Vec2 embedder available for matching");
-                return Ok((false, None));
-            }
-        };
-
+    fn check_embedding_similarity(
+        &mut self,
+        audio_samples: &[f32],
+    ) -> Result<(bool, Option<f32>)> {
         // Compute embedding for current audio
-        let current_embedding = embedder.embed(audio_samples)?;
+        let current_embedding = self.compute_embedding(audio_samples)?;
 
         // Check against reference embedding
         if let Some(ref reference) = self.reference_embedding {
             let similarity = AudioEmbedder::cosine_similarity(reference, &current_embedding);
             info!(
                 "Audio embedding similarity: {:.4} (threshold: {:.2})",
-                similarity, self.similarity_threshold
+                similarity, SIMILARITY_THRESHOLD
             );
 
-            let phrase_found = similarity >= self.similarity_threshold;
+            let phrase_found = similarity >= SIMILARITY_THRESHOLD;
 
             // If match found and this is a better reference, update it
             if phrase_found && similarity > 0.95 {
                 self.reference_embedding = Some(current_embedding.clone());
-                if let Err(e) = Self::save_reference_embedding(&current_embedding) {
+                if let Err(e) = ModelManager::save_reference_embedding(&current_embedding) {
                     warn!("Failed to update reference embedding: {}", e);
                 }
             }
@@ -228,12 +161,22 @@ impl SpeechRecognizer {
             // No reference yet - save this as the reference (bootstrap)
             info!("No reference embedding found, saving current audio as reference");
             self.reference_embedding = Some(current_embedding.clone());
-            if let Err(e) = Self::save_reference_embedding(&current_embedding) {
+            if let Err(e) = ModelManager::save_reference_embedding(&current_embedding) {
                 warn!("Failed to save reference embedding: {}", e);
             }
             // Assume first capture is correct (user should verify)
             Ok((true, Some(1.0)))
         }
+    }
+
+    /// Load a new reference embedding from disk
+    pub fn reload_reference(&mut self) -> Result<()> {
+        let new_ref = ModelManager::load_reference_embedding()
+            .context("No reference embedding file found")?;
+
+        self.reference_embedding = Some(new_ref);
+        info!("Reloaded reference embedding from {}", REFERENCE_EMBEDDING_PATH);
+        Ok(())
     }
 }
 

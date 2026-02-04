@@ -206,7 +206,7 @@ curl http://localhost:8080/health
                                    │
                           ┌────────┴────────┐
                           │                 │
-                    ≥ 0.80              < 0.80
+                    ≥ 0.75              < 0.75
                           │                 │
                           ▼                 ▼
                      (no action)      Send Push Alert
@@ -220,7 +220,19 @@ PhoneCheck uses Wav2Vec2 embeddings for semantic audio matching:
 
 1. **First run**: Captures audio and saves the embedding as a reference
 2. **Subsequent runs**: Compares new audio embedding against reference
-3. **Threshold**: 0.80 cosine similarity (configurable in code)
+3. **Threshold**: 0.75 cosine similarity (configurable in code)
+
+### Duration Sensitivity
+
+Wav2Vec2 mean-pools embeddings across time, so **audio duration affects similarity scores**:
+
+| Captured Duration | Similarity to 5s Reference |
+|-------------------|---------------------------|
+| 1 second | ~0.79 |
+| 2 seconds | ~0.91 |
+| Full (5s) | ~0.99 |
+
+The 0.75 threshold accommodates these variations while still rejecting truly different content (~0.02 similarity).
 
 ### Why This Works
 
@@ -292,6 +304,7 @@ RUST_LOG=warn ./target/release/phonecheck          # Quiet
 - Try increasing `LISTEN_DURATION_SECS`
 
 ### Low similarity score but greeting sounds correct
+- **Duration mismatch**: If calls capture different amounts of audio (e.g., 1s vs 5s), similarity can drop to ~0.79. Ensure `LISTEN_DURATION_SECS` allows the full greeting to play
 - Delete `models/reference_embedding.bin` and re-run to capture new reference
 - Check audio quality with `--save-audio test.wav`
 - Ensure consistent audio duration (greeting should play fully)
