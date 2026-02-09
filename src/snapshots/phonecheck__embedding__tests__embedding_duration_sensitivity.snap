@@ -1,0 +1,9 @@
+---
+source: src/embedding.rs
+expression: results
+---
+[
+    "first_1s_vs_full: 0.7945 (threshold=0.75 -> PASS)",
+    "first_2s_vs_full: 0.9114 (threshold=0.75 -> PASS)",
+    "middle_1s_vs_full: 0.7549 (threshold=0.75 -> PASS)",
+]

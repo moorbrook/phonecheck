@@ -1,0 +1,13 @@
+---
+source: src/embedding.rs
+expression: results
+---
+[
+    "full_audio_vs_reference: 0.9972",
+    "full_passes_threshold: true",
+    "first_1s_vs_reference: 0.7994",
+    "first_1s_passes_threshold: true",
+    "first_2s_vs_reference: 0.9089",
+    "first_2s_passes_threshold: true",
+    "threshold: 0.75",
+]

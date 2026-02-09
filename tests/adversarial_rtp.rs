@@ -31,7 +31,8 @@
 use proptest::prelude::*;
 
 use phonecheck::rtp::jitter::{BufferedPacket, JitterBuffer, JitterBufferConfig};
-use phonecheck::rtp::receiver::{parse_rtp_header, resample_8k_to_16k};
+use phonecheck::rtp::receiver::parse_rtp_header;
+use phonecheck::rtp::resample::resample_8k_to_16k;
 
 // ============================================================================
 // ADVERSARIAL GENERATORS

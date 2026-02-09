@@ -1,0 +1,16 @@
+---
+source: src/embedding.rs
+assertion_line: 374
+expression: results
+---
+[
+    "dimension: 768",
+    "l2_norm: 1.000000",
+    "is_normalized: true",
+    "has_nan: false",
+    "has_inf: false",
+    "all_zeros: false",
+    "min: -0.162982",
+    "max: 0.138259",
+    "mean: -0.000055697",
+]

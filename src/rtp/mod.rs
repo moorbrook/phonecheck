@@ -1,6 +1,7 @@
 pub mod g711;
 pub mod jitter;
 pub mod receiver;
+pub mod resample;
 
 pub use receiver::RtpReceiver;
 

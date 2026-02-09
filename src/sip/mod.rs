@@ -6,4 +6,4 @@ mod transport;
 #[cfg(test)]
 mod model;
 
-pub use client::SipClient;
+pub use client::{CallResult, SipClient};

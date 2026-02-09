@@ -1,0 +1,13 @@
+---
+source: src/embedding.rs
+assertion_line: 428
+expression: results
+---
+[
+    "self_similarity: 1.000000",
+    "self_passes_threshold: true",
+    "slightly_perturbed_similarity: 0.999812",
+    "slightly_perturbed_passes: true",
+    "different_embedding_similarity: 0.024345",
+    "different_passes: false",
+]

@@ -1,0 +1,10 @@
+---
+source: src/embedding.rs
+expression: formatted
+---
+[
+    "normalized_identical: 1.000000",
+    "normalized_slightly_different: 0.999404",
+    "passes_threshold_identical: true",
+    "passes_threshold_slightly_different: true",
+]

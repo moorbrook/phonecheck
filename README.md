@@ -1,19 +1,30 @@
 # PhoneCheck
 
-A PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, captures the audio greeting, and uses Wav2Vec2 audio embeddings for semantic matching. Sends push notifications if the expected greeting is not detected.
+A PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, captures the audio greeting, and uses Wav2Vec2 audio embeddings for semantic matching. Sends push notifications via Pushover if the expected greeting is not detected.
 
 ## Voice AI Building Blocks
 
 This project implements many core components needed for voice AI phone applications:
 
 - **SIP/VoIP Client** - Outbound calling with digest authentication (RFC 3261, 2617)
-- **RTP Audio Handling** - Packet reception, jitter buffer, sequence ordering
+- **RTP Audio Handling** - Packet reception, jitter buffer, sequence reordering
 - **G.711 Codec** - μ-law/A-law decoding with ITU-T compliant lookup tables
-- **Audio Resampling** - 8kHz → 16kHz conversion for ML model compatibility
+- **Audio Resampling** - FFT-based 8kHz → 16kHz conversion using Rubato
 - **NAT Traversal** - STUN discovery + RTP hole punching for reliable audio behind NAT
-- **Audio Embeddings** - Wav2Vec2 via ONNX Runtime (statically linked) for semantic audio matching
+- **Audio Embeddings** - Wav2Vec2 via ONNX Runtime (statically linked) for semantic matching
 - **Speech Recognition** - Whisper integration for transcription logging
 - **Formal Verification** - Kani proofs and Stateright models for correctness
+
+## Architecture
+
+PhoneCheck is built as a modular system with clearly separated concerns:
+
+- **Orchestrator**: Manages the lifecycle of a check (INVITE, RTP capture, ML processing, Alerting).
+- **SIP Stack**: Custom implementation of RFC 3261/2617 handling registration-less outbound calls.
+- **RTP Engine**: Receives G.711 packets, manages a jitter buffer for reordering, and handles NAT hole punching.
+- **ML Pipeline**: Decodes audio, resamples to 16kHz, transcribes via Whisper (for logs), and computes Wav2Vec2 embeddings for comparison.
+- **Scheduler**: A business-hours-aware loop (8am-5pm Pacific) that manages check timing and graceful shutdown.
+- **Health Server**: An embedded HTTP server providing monitoring endpoints for Kubernetes or external probes.
 
 ## Use Case
 
@@ -22,23 +33,23 @@ Monitor your business phone system to ensure callers hear the correct greeting. 
 1. Call your phone number every hour during business hours (8am-5pm Pacific)
 2. Capture the audio and compute a semantic embedding using Wav2Vec2
 3. Compare against a reference embedding using cosine similarity
-4. Send you a push notification if the greeting doesn't match
+4. Send you a push notification if the greeting doesn't match or the call fails
 
 ## Why Audio Embeddings?
 
 Traditional text-based matching fails when:
 - Whisper transcribes "thanks for calling" but you expected "thank you for calling"
-- Minor audio variations cause different transcriptions
+- Minor audio variations cause different transcriptions (e.g., background noise)
 
-**Wav2Vec2 embeddings solve this** by comparing audio semantically. Similar-sounding phrases produce similar embeddings, so "thanks for calling" and "thank you for calling" both match.
+**Wav2Vec2 embeddings solve this** by comparing audio semantically. Similar-sounding phrases produce similar embeddings, allowing for natural variation while detecting significant changes or failures.
 
 ## Requirements
 
-- Rust 1.88+ (ONNX Runtime is statically linked - no separate install needed)
+- Rust 1.88+
 - CMake (for building whisper.cpp)
-- Python 3.11-3.13 with `uv` (one-time, for exporting Wav2Vec2 model to ONNX)
-- A [voip.ms](https://voip.ms) account with a SIP sub-account for making calls
-- A [Pushover](https://pushover.net) account for push notifications
+- Python 3.11-3.13 with `uv` (one-time setup for exporting Wav2Vec2 model)
+- A [voip.ms](https://voip.ms) account with a SIP sub-account
+- A [Pushover](https://pushover.net) account for notifications
 
 ## Installation
 
@@ -50,45 +61,20 @@ cd phonecheck
 # Build (requires cmake; ONNX Runtime is downloaded automatically)
 cargo build --release
 
-# Download Whisper model and verify
+# Download Whisper model
 mkdir -p models
 curl -L -o models/ggml-base.en.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
-echo "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002  models/ggml-base.en.bin" | shasum -a 256 -c
 
-# Export Wav2Vec2 to ONNX (one-time setup, downloads ~380MB model)
-uv run --python 3.13 scripts/export_wav2vec2.py
+# Export Wav2Vec2 to ONNX (downloads ~380MB model)
+uv run scripts/export_wav2vec2.py
 ```
 
-The first build downloads ONNX Runtime (~50MB) and statically links it into the binary. The resulting binary is self-contained (~27MB) with no runtime dependencies.
-
-## voip.ms Setup
-
-PhoneCheck requires a [voip.ms](https://voip.ms) account for SIP calling:
-
-1. Log in to [voip.ms portal](https://voip.ms)
-2. Go to **Main Menu → Sub Accounts → Create Sub Account**
-3. Choose a username and password
-4. Note the assigned SIP server (e.g., `atlanta.voip.ms`)
-5. Set **CallerID** to a DID you own (required for outbound calls)
-
-## Pushover Setup
-
-PhoneCheck uses [Pushover](https://pushover.net) for push notifications ($5 one-time purchase):
-
-1. Create account at [pushover.net](https://pushover.net)
-2. Install Pushover app on your phone
-3. Copy your **User Key** from the dashboard
-4. Create an application at [pushover.net/apps/build](https://pushover.net/apps/build)
-5. Copy the **API Token** for your app
+The resulting binary is self-contained (~27MB) as ONNX Runtime is statically linked.
 
 ## Configuration
 
 Copy `.env.example` to `.env` and configure:
-
-```bash
-cp .env.example .env
-```
 
 ### Required Settings
 
@@ -97,231 +83,86 @@ cp .env.example .env
 | `SIP_USERNAME` | voip.ms sub-account username | `mysubaccount` |
 | `SIP_PASSWORD` | voip.ms sub-account password | `secretpass` |
 | `SIP_SERVER` | voip.ms SIP server | `atlanta.voip.ms` |
-| `TARGET_PHONE` | Phone number to call | `19095551234` |
-| `EXPECTED_PHRASE` | Phrase for logging (matching uses embeddings) | `thank you for calling` |
-| `PUSHOVER_USER_KEY` | Your Pushover user key | `uQiRzpo4DXghDmr9QzzfQu27cmVRsG` |
-| `PUSHOVER_API_TOKEN` | Your Pushover app API token | `azGDORePK8gMaC0QOYAMyEEuzJnyUi` |
-| `WHISPER_MODEL_PATH` | Path to Whisper model | `./models/ggml-base.en.bin` |
+| `TARGET_PHONE` | 10-digit phone number to call | `19095551234` |
+| `PUSHOVER_USER_KEY` | Your Pushover user key | `uQiRzpo4DXghD...` |
+| `PUSHOVER_API_TOKEN` | Your Pushover app API token | `azGDORePK8gMa...` |
 
 ### Optional Settings
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `EXPECTED_PHRASE` | Phrase for logging/transcription check | `thank you for calling` |
 | `SIP_PORT` | SIP server port | `5060` |
-| `LISTEN_DURATION_SECS` | How long to listen (1-300) | `10` |
-| `MIN_AUDIO_DURATION_MS` | Minimum valid audio length | `500` |
-| `STUN_SERVER` | STUN server for NAT traversal | (disabled) |
+| `LISTEN_DURATION_SECS` | How long to listen (max 300) | `10` |
+| `MIN_AUDIO_DURATION_MS`| Min audio needed to avoid silence alerts | `500` |
+| `STUN_SERVER` | STUN server for NAT (e.g. `stun.l.google.com:19302`) | (disabled) |
 | `HEALTH_PORT` | HTTP health check port | (disabled) |
-| `RUST_LOG` | Log level | `info` |
+| `WHISPER_MODEL_PATH` | Path to Whisper GGML model | `./models/ggml-base.en.bin` |
+| `RUST_LOG` | Log level (error, warn, info, debug, trace) | `info` |
 
 ## Usage
 
-### Run as Daemon (Recommended)
-
+### Run as Daemon
+Runs hourly checks during business hours (8am-5pm Pacific).
 ```bash
-# Runs hourly checks during business hours (8am-5pm Pacific)
 ./target/release/phonecheck
 ```
 
 ### Run Single Check
-
 ```bash
-# Run one check immediately and exit
 ./target/release/phonecheck --once
 ```
 
-### Capture Audio for Testing
+### Advanced Flags
+- `--validate`: Check configuration and network reachability without calling.
+- `--save-audio [path]`: Save the captured audio to a WAV file for debugging.
 
-```bash
-# Save captured audio to a WAV file
-./target/release/phonecheck --once --save-audio test.wav
-```
+## Advanced Features
 
-### Validate Configuration
+### Formal Verification
+PhoneCheck uses advanced verification techniques to ensure reliability:
+- **Kani Proofs**: Formally verify that PII redaction (phones/emails) never leaks data and that RTP header parsing is memory-safe.
+- **Stateright Models**: Model the SIP state machine and Scheduler logic to prove absence of deadlocks and correct state transitions.
 
-```bash
-# Check that all settings are valid without making a call
-./target/release/phonecheck --validate
-```
+### NAT Traversal
+Works behind NAT without port forwarding by combining:
+1. **STUN Discovery**: Learns public IP to advertise in SIP SDP.
+2. **RTP Hole Punching**: Sends empty packets to the remote server to open the NAT mapping for return audio.
 
-### Command Line Options
+### Graceful Shutdown
+Handles `SIGINT` (Ctrl+C) and `SIGTERM` cleanly:
+- Active calls are terminated with a SIP `BYE` message.
+- The scheduler waits up to 10 seconds for in-flight tasks to complete.
+- Singleton lock (`/tmp/phonecheck.lock`) is released automatically.
 
-```
-USAGE: phonecheck [OPTIONS]
-
-OPTIONS:
-    --once                  Run a single check and exit
-    --save-audio [PATH]     Save captured audio to WAV file
-    --validate              Validate configuration and exit
-    --help, -h              Show help message
-
-ENVIRONMENT:
-    See .env.example for required configuration variables
-```
-
-## Health Check Endpoint
-
+### Health Monitoring
 If `HEALTH_PORT` is set, an HTTP server exposes:
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /health` | JSON status of last check |
-| `GET /ready` | 200 if healthy, 503 if last check failed |
-| `GET /metrics` | Prometheus metrics |
-
-Example:
-```bash
-curl http://localhost:8080/health
-```
-
-## How It Works
-
-```
-┌─────────────┐    SIP INVITE    ┌─────────────┐    PSTN    ┌─────────────┐
-│ PhoneCheck  │ ───────────────► │  voip.ms    │ ─────────► │ Your Phone  │
-│             │ ◄─────────────── │  Server     │ ◄───────── │   System    │
-│             │    RTP Audio     │             │            │             │
-└─────────────┘                  └─────────────┘            └─────────────┘
-       │
-       │ G.711 decode → Resample 8k→16k
-       │
-       ▼
-┌─────────────────────────────────────────────────────────┐
-│                    Audio Processing                      │
-├─────────────────────────┬───────────────────────────────┤
-│      Whisper            │         Wav2Vec2              │
-│   (Transcription)       │       (Embeddings)            │
-│                         │                               │
-│  "Thank you for         │  [0.009, 0.007, -0.003, ...]  │
-│   calling Cubic..."     │       768 dimensions          │
-└─────────────────────────┴───────────────────────────────┘
-                                    │
-                                    ▼
-                          ┌─────────────────┐
-                          │ Cosine Similarity│
-                          │ vs Reference     │
-                          │                  │
-                          │ similarity: 0.99 │
-                          └────────┬────────┘
-                                   │
-                          ┌────────┴────────┐
-                          │                 │
-                    ≥ 0.75              < 0.75
-                          │                 │
-                          ▼                 ▼
-                     (no action)      Send Push Alert
-```
+- `GET /health`: JSON status including success/failure counts and timestamps.
+- `GET /ready`: Returns 200 if the last check succeeded, 503 if it failed.
+- `GET /metrics`: Prometheus-compatible metrics for integration with Grafana.
 
 ## Audio Matching
 
-PhoneCheck uses Wav2Vec2 embeddings for semantic audio matching:
+### Reference Capture
+On the first successful run, PhoneCheck saves the audio embedding as a baseline in `models/reference_embedding.bin`. Subsequent runs compare against this baseline.
 
-### How It Works
+### Similarity Threshold
+The cosine similarity threshold is hardcoded at **0.75**. 
+- Same greeting typically yields **>0.95**.
+- Slight variations (duration/noise) yield **0.80-0.90**.
+- Different greetings or "number not in service" messages yield **<0.10**.
 
-1. **First run**: Captures audio and saves the embedding as a reference
-2. **Subsequent runs**: Compares new audio embedding against reference
-3. **Threshold**: 0.75 cosine similarity (configurable in code)
-
-### Duration Sensitivity
-
-Wav2Vec2 mean-pools embeddings across time, so **audio duration affects similarity scores**:
-
-| Captured Duration | Similarity to 5s Reference |
-|-------------------|---------------------------|
-| 1 second | ~0.79 |
-| 2 seconds | ~0.91 |
-| Full (5s) | ~0.99 |
-
-The 0.75 threshold accommodates these variations while still rejecting truly different content (~0.02 similarity).
-
-### Why This Works
-
-Wav2Vec2 embeddings capture both **phonetic** and **semantic** audio features:
-
-| Scenario | Text Matching | Embedding Matching |
-|----------|---------------|-------------------|
-| "thanks for calling" vs "thank you for calling" | ❌ Fails | ✅ ~0.95 similarity |
-| Same greeting, different day | ✅ Works | ✅ ~0.99 similarity |
-| Wrong number / different greeting | ✅ Fails | ✅ ~0.3 similarity |
-
-### Model Files
-
-```
-models/
-├── ggml-base.en.bin          # Whisper (147MB) - transcription
-├── wav2vec2_encoder.onnx     # Wav2Vec2 (1.5MB) - embeddings
-├── wav2vec2_encoder.onnx.data # Wav2Vec2 weights (377MB)
-└── reference_embedding.bin   # Cached reference (3KB)
-```
-
-**SHA256 Checksums:**
-```
-a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002  ggml-base.en.bin
-c7c1889bdbad143221dead8137d067b092fa3adb891c76a64d26d3dcb3c41b60  wav2vec2_encoder.onnx
-836b7752b6f486fb53c0c16a09342859f24d7a89d4a4eccb1818a7d31c467f27  wav2vec2_encoder.onnx.data
-```
-
-### Resetting the Reference
-
-To capture a new reference embedding:
-
+To reset the baseline:
 ```bash
 rm models/reference_embedding.bin
 ./target/release/phonecheck --once
 ```
 
-## NAT Traversal
-
-PhoneCheck works behind NAT without port forwarding using two techniques:
-
-1. **STUN Discovery**: Queries a STUN server to learn your public IP address, which is advertised in the SDP so the remote VoIP server knows where to send audio
-
-2. **NAT Hole Punching**: Sends empty RTP packets to the remote media server immediately after call connect, creating a NAT mapping that allows return traffic through
-
-Both are required:
-- Without STUN: The SDP advertises your private IP (192.168.x.x) which the remote can't reach
-- Without hole punching: The NAT may block incoming RTP even with the correct public IP
-
-Configure STUN in `.env`:
-```bash
-STUN_SERVER=stun.l.google.com:19302
-```
-
-## Logging
-
-Control log verbosity with `RUST_LOG`:
-
-```bash
-RUST_LOG=debug ./target/release/phonecheck --once  # Verbose
-RUST_LOG=warn ./target/release/phonecheck          # Quiet
-```
-
 ## Troubleshooting
 
-### "No audio received"
-- Check that your SIP credentials are correct
-- Verify the target phone number answers (not voicemail)
-- Try increasing `LISTEN_DURATION_SECS`
-
-### Low similarity score but greeting sounds correct
-- **Duration mismatch**: If calls capture different amounts of audio (e.g., 1s vs 5s), similarity can drop to ~0.79. Ensure `LISTEN_DURATION_SECS` allows the full greeting to play
-- Delete `models/reference_embedding.bin` and re-run to capture new reference
-- Check audio quality with `--save-audio test.wav`
-- Ensure consistent audio duration (greeting should play fully)
-
-### "Wav2Vec2 embedder not available"
-- Run `uv run --python 3.13 scripts/export_wav2vec2.py` to export the model
-- Verify `models/wav2vec2_encoder.onnx` and `models/wav2vec2_encoder.onnx.data` exist
-
-### NAT/Firewall issues
-- Set `STUN_SERVER=stun.l.google.com:19302` (required for NAT traversal)
-- PhoneCheck uses STUN + NAT hole punching for reliable audio behind NAT
-- No port forwarding required in most cases
-
-### Pushover alerts not sending
-- Verify `PUSHOVER_USER_KEY` and `PUSHOVER_API_TOKEN` are correct
-- Check Pushover app is installed on your device
-- Ensure notifications are enabled for the Pushover app
+- **No audio**: Ensure `STUN_SERVER` is configured if you are behind NAT.
+- **Low similarity**: If the greeting is cut off, increase `LISTEN_DURATION_SECS`.
+- **Stale lock**: If the process crashed, manually remove `/tmp/phonecheck.lock`.
 
 ## License
 

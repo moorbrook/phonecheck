@@ -1,17 +1,3 @@
-mod cli;
-mod config;
-mod embedding;
-mod health;
-mod model_manager;
-mod notify;
-mod orchestrator;
-mod redact;
-mod rtp;
-mod scheduler;
-mod sip;
-mod speech;
-mod stun;
-
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::fs::File;
@@ -19,12 +5,14 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use cli::{parse_args, print_help};
-use config::Config;
-use health::HealthMetrics;
-use notify::Notifier;
-use scheduler::run_scheduler;
-use speech::SpeechRecognizer;
+use phonecheck::cli::{parse_args, print_help};
+use phonecheck::config::Config;
+use phonecheck::health::{self, HealthMetrics};
+use phonecheck::notify::Notifier;
+use phonecheck::orchestrator;
+use phonecheck::redact;
+use phonecheck::scheduler::run_scheduler;
+use phonecheck::speech::SpeechRecognizer;
 
 #[tokio::main]
 async fn main() -> Result<()> {

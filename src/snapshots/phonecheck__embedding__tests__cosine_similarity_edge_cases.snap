@@ -1,0 +1,34 @@
+---
+source: src/embedding.rs
+expression: results
+---
+[
+    (
+        "empty_vectors",
+        0.0,
+    ),
+    (
+        "mismatched_lengths",
+        0.0,
+    ),
+    (
+        "zero_vectors",
+        0.0,
+    ),
+    (
+        "one_zero_vector",
+        0.0,
+    ),
+    (
+        "tiny_values",
+        0.0,
+    ),
+    (
+        "large_values",
+        1.0000001,
+    ),
+    (
+        "mixed_signs",
+        1.0,
+    ),
+]

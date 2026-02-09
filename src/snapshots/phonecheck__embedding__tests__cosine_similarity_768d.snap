@@ -1,0 +1,18 @@
+---
+source: src/embedding.rs
+expression: results
+---
+[
+    (
+        "identical_768d",
+        1.0,
+    ),
+    (
+        "similar_768d",
+        0.99990785,
+    ),
+    (
+        "different_768d",
+        0.042941935,
+    ),
+]

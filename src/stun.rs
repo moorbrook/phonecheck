@@ -51,11 +51,8 @@ pub async fn discover_public_address(stun_server: &str) -> Result<SocketAddr> {
     Ok(result)
 }
 
-/// Perform synchronous STUN binding request
-fn stun_binding_request(server_addr: SocketAddr) -> Result<SocketAddr> {
-    // Create UDP socket
-    let socket = UdpSocket::bind("0.0.0.0:0")
-        .context("Failed to bind STUN socket")?;
+/// Perform synchronous STUN binding request using a provided socket
+pub fn stun_binding_request_on_socket(socket: &UdpSocket, server_addr: SocketAddr) -> Result<SocketAddr> {
     socket
         .set_read_timeout(Some(STUN_TIMEOUT))
         .context("Failed to set socket timeout")?;
@@ -81,6 +78,14 @@ fn stun_binding_request(server_addr: SocketAddr) -> Result<SocketAddr> {
 
     // Parse response
     parse_binding_response(&buf[..len], &transaction_id)
+}
+
+/// Perform synchronous STUN binding request
+fn stun_binding_request(server_addr: SocketAddr) -> Result<SocketAddr> {
+    // Create UDP socket
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .context("Failed to bind STUN socket")?;
+    stun_binding_request_on_socket(&socket, server_addr)
 }
 
 /// Build a STUN Binding Request message
@@ -224,7 +229,31 @@ fn parse_mapped_address(data: &[u8]) -> Result<SocketAddr> {
     }
 }
 
-/// Discover public address with fallback to local address
+/// Discover public address using an existing Tokio UDP socket
+pub async fn discover_public_address_tokio(socket: &tokio::net::UdpSocket, stun_server: &str) -> Result<SocketAddr> {
+    let server_addr = stun_server
+        .to_socket_addrs()
+        .context(format!("Failed to resolve STUN server: {}", stun_server))?
+        .next()
+        .context("No addresses found for STUN server")?;
+
+    // Generate transaction ID
+    let transaction_id: [u8; 12] = rand::random();
+    let request = build_binding_request(&transaction_id);
+
+    // Send request
+    socket.send_to(&request, server_addr).await?;
+
+    // Receive response with timeout
+    let mut buf = [0u8; 512];
+    let result = tokio::time::timeout(STUN_TIMEOUT, socket.recv_from(&mut buf)).await;
+
+    match result {
+        Ok(Ok((len, _))) => parse_binding_response(&buf[..len], &transaction_id),
+        Ok(Err(e)) => Err(anyhow::anyhow!("STUN receive error: {}", e)),
+        Err(_) => Err(anyhow::anyhow!("STUN timeout")),
+    }
+}
 ///
 /// If STUN server is configured, attempts STUN discovery.
 /// On failure, logs a warning and returns None (caller should use local IP).

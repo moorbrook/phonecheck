@@ -1,0 +1,56 @@
+---
+source: src/embedding.rs
+expression: results
+---
+[
+    (
+        "identical",
+        1.0,
+        true,
+    ),
+    (
+        "very_high",
+        0.95,
+        true,
+    ),
+    (
+        "high",
+        0.9,
+        true,
+    ),
+    (
+        "at_threshold",
+        0.75,
+        true,
+    ),
+    (
+        "just_below_threshold",
+        0.74,
+        false,
+    ),
+    (
+        "moderate",
+        0.7,
+        false,
+    ),
+    (
+        "low",
+        0.5,
+        false,
+    ),
+    (
+        "very_low",
+        0.2,
+        false,
+    ),
+    (
+        "orthogonal",
+        0.0,
+        false,
+    ),
+    (
+        "opposite",
+        -0.5,
+        false,
+    ),
+]
