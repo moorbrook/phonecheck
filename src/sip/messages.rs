@@ -96,10 +96,16 @@ fn build_invite_internal(
     let local_ip = local_addr.ip();
     let local_port = local_addr.port();
 
-    // Use external address for SDP if available (NAT traversal)
+    // Use external address for SDP and Contact if available (NAT traversal)
     let (sdp_ip, sdp_rtp_port) = match external_rtp_addr {
         Some(addr) => (addr.ip().to_string(), addr.port()),
         None => (local_ip.to_string(), rtp_port),
+    };
+
+    // Use external IP for Contact if we have one, otherwise use local IP
+    let contact_ip = match external_rtp_addr {
+        Some(addr) => addr.ip().to_string(),
+        None => local_ip.to_string(),
     };
 
     // SDP body for audio session
@@ -137,7 +143,7 @@ fn build_invite_internal(
         target_uri,
         call_id,
         cseq,
-        local_ip,
+        contact_ip,
         local_port,
         auth_header,
         content_length,
@@ -251,6 +257,84 @@ pub fn build_bye(
         to_header,
         call_id,
         cseq
+    )
+}
+
+/// Build SIP REGISTER request
+///
+/// Registers the client with the SIP server, authorizing our IP
+/// for outbound calls. Essential when public IP changes.
+pub fn build_register(
+    server: &str,
+    from_uri: &str,
+    from_display: &str,
+    call_id: &str,
+    from_tag: &str,
+    cseq: u32,
+    local_addr: SocketAddr,
+) -> String {
+    build_register_internal(server, from_uri, from_display, call_id, from_tag, cseq, local_addr, None)
+}
+
+/// Build SIP REGISTER with Authorization header for digest authentication
+pub fn build_register_with_auth(
+    server: &str,
+    from_uri: &str,
+    from_display: &str,
+    call_id: &str,
+    from_tag: &str,
+    cseq: u32,
+    local_addr: SocketAddr,
+    authorization: &str,
+) -> String {
+    build_register_internal(server, from_uri, from_display, call_id, from_tag, cseq, local_addr, Some(authorization))
+}
+
+fn build_register_internal(
+    server: &str,
+    from_uri: &str,
+    from_display: &str,
+    call_id: &str,
+    from_tag: &str,
+    cseq: u32,
+    local_addr: SocketAddr,
+    authorization: Option<&str>,
+) -> String {
+    let branch = generate_branch();
+    let local_ip = local_addr.ip();
+    let local_port = local_addr.port();
+
+    let auth_header = match authorization {
+        Some(auth) => format!("Authorization: {}\r\n", auth),
+        None => String::new(),
+    };
+
+    format!(
+        "REGISTER sip:{} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP {}:{};branch={};rport\r\n\
+         Max-Forwards: 70\r\n\
+         From: \"{}\" <{}>;tag={}\r\n\
+         To: <{}>\r\n\
+         Call-ID: {}\r\n\
+         CSeq: {} REGISTER\r\n\
+         Contact: <sip:phonecheck@{}:{}>\r\n\
+         {}Expires: 120\r\n\
+         User-Agent: phonecheck/0.1.0\r\n\
+         Content-Length: 0\r\n\
+         \r\n",
+        server,
+        local_ip,
+        local_port,
+        branch,
+        from_display,
+        from_uri,
+        from_tag,
+        from_uri,
+        call_id,
+        cseq,
+        local_ip,
+        local_port,
+        auth_header,
     )
 }
 
@@ -588,6 +672,50 @@ mod tests {
         assert!(bye.contains("To:"));
         assert!(bye.contains("CSeq: 2 BYE"));
         assert!(bye.contains("Content-Length: 0"));
+    }
+
+    #[test]
+    fn test_build_register_contains_required_headers() {
+        let register = build_register(
+            "losangeles4.voip.ms",
+            "sip:testuser@losangeles4.voip.ms",
+            "PhoneCheck",
+            "callid123@host",
+            "fromtag",
+            1,
+            "192.168.1.1:5060".parse().unwrap(),
+        );
+
+        assert!(register.starts_with("REGISTER sip:losangeles4.voip.ms SIP/2.0\r\n"));
+        assert!(register.contains("Via:"));
+        assert!(register.contains("From:"));
+        assert!(register.contains("To: <sip:testuser@losangeles4.voip.ms>"));
+        assert!(register.contains("Call-ID:"));
+        assert!(register.contains("CSeq: 1 REGISTER"));
+        assert!(register.contains("Contact:"));
+        assert!(register.contains("Expires: 120"));
+        assert!(register.contains("Content-Length: 0"));
+        assert!(!register.contains("Authorization:"));
+    }
+
+    #[test]
+    fn test_build_register_with_auth_contains_authorization() {
+        let auth_header = r#"Digest username="user", realm="test", nonce="abc123", uri="sip:server.com", response="xyz789""#;
+        let register = build_register_with_auth(
+            "server.com",
+            "sip:user@server.com",
+            "PhoneCheck",
+            "callid123@host",
+            "fromtag",
+            2,
+            "192.168.1.1:5060".parse().unwrap(),
+            auth_header,
+        );
+
+        assert!(register.starts_with("REGISTER sip:server.com SIP/2.0\r\n"));
+        assert!(register.contains("Authorization: Digest"));
+        assert!(register.contains("CSeq: 2 REGISTER"));
+        assert!(register.contains("Expires: 120"));
     }
 
     #[test]

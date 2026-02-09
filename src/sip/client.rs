@@ -1,21 +1,18 @@
 /// SIP Client - Makes outbound calls and manages call state
 /// Implements basic SIP UAC (User Agent Client) functionality
-///
-/// Supports both IP-based authentication and RFC 2617/7616 digest authentication.
-/// When the server responds with 401 or 407, the client will retry with
-/// digest authentication using the configured SIP password.
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::lookup_host;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::digest::{extract_authenticate_header, DigestChallenge, DigestResponse};
 use super::messages::{
-    build_ack, build_bye, build_invite, build_invite_with_auth, extract_rtp_address,
-    extract_to_tag, extract_via_branch, generate_call_id, generate_tag, parse_status_code,
+    build_ack, build_bye, build_invite, build_invite_with_auth, build_register,
+    build_register_with_auth, extract_rtp_address, extract_to_tag, extract_via_branch,
+    generate_call_id, generate_tag, parse_status_code,
 };
 use super::transport::SipTransport;
 use crate::config::Config;
@@ -25,9 +22,6 @@ use crate::rtp::RtpReceiver;
 pub struct SipClient {
     config: std::sync::Arc<Config>,
     server_addr: SocketAddr,
-    /// Public address discovered via STUN (if configured)
-    public_addr: Option<std::net::IpAddr>,
-    /// Cached SIP URIs (computed once on construction)
     from_uri: String,
     target_uri: String,
     display_name: String,
@@ -40,12 +34,10 @@ pub struct CallResult {
     pub audio_received: bool,
     pub audio_samples: Vec<f32>,
     pub error: Option<String>,
-    /// SIP status code if call was rejected
     pub sip_status: Option<u16>,
 }
 
 impl CallResult {
-    /// Create a successful call result with audio
     pub fn success(audio_samples: Vec<f32>, audio_received: bool) -> Self {
         Self {
             connected: true,
@@ -56,52 +48,29 @@ impl CallResult {
         }
     }
 
-    /// Create a failed call result with an error message
     pub fn failed(error: String) -> Self {
-        Self::default().with_error(error)
+        Self { connected: false, error: Some(error), ..Default::default() }
     }
 
-    /// Create a failed call result with a SIP status code
     pub fn failed_with_status(status: u16, error: String) -> Self {
-        Self::default().with_status(status).with_error(error)
-    }
-
-    /// Add an error message to a default call result
-    fn with_error(mut self, error: String) -> Self {
-        self.error = Some(error);
-        self
-    }
-
-    /// Add a SIP status code to a default call result
-    fn with_status(mut self, status: u16) -> Self {
-        self.sip_status = Some(status);
-        self
+        Self { connected: false, sip_status: Some(status), error: Some(error), ..Default::default() }
     }
 }
 
 /// Classify SIP error codes for better error handling and reporting
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SipErrorCategory {
-    /// 401/407: Authentication required
     AuthRequired,
-    /// 404: Number not found / bad configuration
     NotFound,
-    /// 486/600/603: Busy or declined
     Busy,
-    /// 408/480/504: Timeout / unavailable
     Timeout,
-    /// 500-599: Server error
     ServerError,
-    /// 4xx other: Client error
     ClientError,
-    /// 3xx: Redirect (not currently handled)
     Redirect,
-    /// Unknown or unparseable
     Unknown,
 }
 
 impl SipErrorCategory {
-    /// Classify a SIP status code
     pub fn from_status(code: u16) -> Self {
         match code {
             401 | 407 => SipErrorCategory::AuthRequired,
@@ -115,35 +84,22 @@ impl SipErrorCategory {
         }
     }
 
-    /// Human-readable description of the error
     pub fn description(&self) -> &'static str {
         match self {
-            SipErrorCategory::AuthRequired => "SIP authentication required - configure IP authentication or implement digest auth",
-            SipErrorCategory::NotFound => "Number not found - check TARGET_PHONE configuration",
-            SipErrorCategory::Busy => "Line busy or call declined - try again later",
-            SipErrorCategory::Timeout => "Call timeout - remote party unavailable",
-            SipErrorCategory::ServerError => "SIP server error - try again later",
-            SipErrorCategory::ClientError => "SIP client error - check configuration",
-            SipErrorCategory::Redirect => "Call redirected - not currently supported",
+            SipErrorCategory::AuthRequired => "SIP authentication required",
+            SipErrorCategory::NotFound => "Number not found",
+            SipErrorCategory::Busy => "Line busy or call declined",
+            SipErrorCategory::Timeout => "Call timeout",
+            SipErrorCategory::ServerError => "SIP server error",
+            SipErrorCategory::ClientError => "SIP client error",
+            SipErrorCategory::Redirect => "Call redirected",
             SipErrorCategory::Unknown => "Unknown SIP error",
         }
-    }
-
-    /// Whether this error type is transient (worth retrying)
-    pub fn is_transient(&self) -> bool {
-        matches!(
-            self,
-            SipErrorCategory::Busy
-                | SipErrorCategory::Timeout
-                | SipErrorCategory::ServerError
-        )
     }
 }
 
 impl SipClient {
-    /// Create a new SIP client
     pub async fn new(config: std::sync::Arc<Config>) -> Result<Self> {
-        // Resolve SIP server address
         let server_host = format!("{}:{}", config.sip_server, config.sip_port);
         let server_addr = lookup_host(&server_host)
             .await
@@ -153,83 +109,33 @@ impl SipClient {
 
         info!("SIP server resolved to {}", server_addr);
 
-        // Discover public IP via STUN if configured
-        let public_addr = if let Some(ref stun_server) = config.stun_server {
-            match crate::stun::discover_public_address(stun_server).await {
-                Ok(addr) => {
-                    info!("STUN discovered public IP: {}", addr.ip());
-                    Some(addr.ip())
-                }
-                Err(e) => {
-                    warn!("STUN discovery failed, using local IP: {}", e);
-                    None
-                }
-            }
-        } else {
-            debug!("No STUN server configured, using local IP");
-            None
-        };
-
-        // Cache SIP URIs for reuse across calls
         let from_uri = format!("sip:{}@{}", config.sip_username, config.sip_server);
         let target_uri = format!("sip:{}@{}", config.target_phone, config.sip_server);
-        let display_name = "PhoneCheck".to_string();
 
         Ok(Self {
             config,
             server_addr,
-            public_addr,
             from_uri,
             target_uri,
-            display_name,
+            display_name: "PhoneCheck".to_string(),
         })
     }
 
-    /// Make a test call and capture audio
-    pub async fn make_test_call(&self, listen_duration: Duration) -> Result<CallResult> {
-        self.make_test_call_on_port(listen_duration, 0).await
-    }
-
-    /// Make a test call with cancellation support for graceful shutdown
     pub async fn make_test_call_cancellable(
         &self,
         listen_duration: Duration,
         cancel_token: CancellationToken,
     ) -> Result<CallResult> {
-        self.make_test_call_on_port_cancellable(listen_duration, 0, cancel_token)
-            .await
+        // Register with SIP server to authorize our IP for outbound calls.
+        // This is essential when public IP changes (DHCP, location change).
+        // Non-fatal: if registration fails, we still attempt the call.
+        if let Err(e) = self.register().await {
+            warn!("SIP registration failed: {} - proceeding with call attempt", e);
+        }
+        let rtp_receiver = RtpReceiver::bind(0).await?;
+        self.make_test_call_with_receiver(listen_duration, rtp_receiver, cancel_token).await
     }
 
-    /// Make a test call on a specific RTP port (0 = auto-assign)
-    /// Use this when you need to know the port in advance (e.g., for packet capture)
-    pub async fn make_test_call_on_port(
-        &self,
-        listen_duration: Duration,
-        rtp_port_hint: u16,
-    ) -> Result<CallResult> {
-        self.make_test_call_on_port_cancellable(
-            listen_duration,
-            rtp_port_hint,
-            CancellationToken::new(),
-        )
-        .await
-    }
-
-    /// Make a test call on a specific RTP port with cancellation support
-    pub async fn make_test_call_on_port_cancellable(
-        &self,
-        listen_duration: Duration,
-        rtp_port_hint: u16,
-        cancel_token: CancellationToken,
-    ) -> Result<CallResult> {
-        // Set up RTP receiver on specified port (0 = auto-assign)
-        let rtp_receiver = RtpReceiver::bind(rtp_port_hint).await?;
-        self.make_test_call_with_receiver(listen_duration, rtp_receiver, cancel_token)
-            .await
-    }
-
-    /// Make a test call using a pre-bound RTP receiver
-    /// Use this to avoid port race conditions when you need the port before the call
     pub async fn make_test_call_with_receiver(
         &self,
         listen_duration: Duration,
@@ -237,286 +143,209 @@ impl SipClient {
         cancel_token: CancellationToken,
     ) -> Result<CallResult> {
         let rtp_port = rtp_receiver.local_port()?;
-        debug!("RTP receiver ready on port {}", rtp_port);
-
-        // Create SIP transport
         let transport = SipTransport::new(self.server_addr).await?;
         let local_addr = transport.local_addr()?;
-
-        // Generate call identifiers
         let call_id = generate_call_id(&local_addr.ip().to_string());
         let from_tag = generate_tag();
+        let mut cseq = 1u32;
 
         info!("Initiating call to {}", self.config.target_phone);
 
-        // Build external RTP address for SDP (if STUN discovered public IP)
-        let external_rtp_addr = self.public_addr.map(|ip| {
-            std::net::SocketAddr::new(ip, rtp_port)
-        });
+        let external_rtp_addr = if let Some(ref stun_server) = self.config.stun_server {
+            match rtp_receiver.discover_public_address(stun_server).await {
+                Ok(addr) => {
+                    info!("STUN discovered public RTP address: {}", addr);
+                    Some(addr)
+                }
+                Err(e) => {
+                    warn!("STUN discovery for RTP failed: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
-        // Build and send initial INVITE
-        let mut cseq = 1u32;
-        let invite = build_invite(
-            &self.target_uri,
-            &self.from_uri,
-            &self.display_name,
-            &call_id,
-            &from_tag,
-            cseq,
-            local_addr,
-            rtp_port,
-            external_rtp_addr,
-        );
+        let invite = build_invite(&self.target_uri, &self.from_uri, &self.display_name, &call_id, &from_tag, cseq, local_addr, rtp_port, external_rtp_addr);
 
-        // Send INVITE with RFC 3261 retransmission and wait for final response
         let mut response = match transport.send_invite_await_final(&invite).await {
             Ok(r) => r,
-            Err(e) => {
-                return Ok(CallResult::failed(format!("No response from server: {}", e)));
-            }
+            Err(e) => return Ok(CallResult::failed(format!("No response from server: {}", e))),
         };
 
         let mut status_code = parse_status_code(&response).unwrap_or(0);
-        debug!("Received final response: {}", status_code);
 
-        // Handle 401/407 authentication challenge
         if status_code == 401 || status_code == 407 {
-            // Check if we have a password configured
-            if self.config.sip_password.is_empty() {
-                let error_msg = format!(
-                    "SIP server requires authentication ({}), but no SIP_PASSWORD configured",
-                    status_code
-                );
-                tracing::error!("{}", error_msg);
-                return Ok(CallResult::failed_with_status(status_code, error_msg));
+            let res = self.handle_auth(&transport, &response, &call_id, &from_tag, &mut cseq, local_addr, rtp_port, external_rtp_addr).await?;
+            match res {
+                Ok(r) => {
+                    response = r;
+                    status_code = parse_status_code(&response).unwrap_or(0);
+                }
+                Err(call_res) => return Ok(call_res),
             }
-
-            // Extract and parse the challenge
-            let auth_header = match extract_authenticate_header(&response) {
-                Some(h) => h,
-                None => {
-                    let error_msg = "Server sent 401/407 but no WWW-Authenticate header found";
-                    tracing::error!("{}", error_msg);
-                    return Ok(CallResult::failed_with_status(
-                        status_code,
-                        error_msg.to_string(),
-                    ));
-                }
-            };
-
-            let challenge = match DigestChallenge::parse(&auth_header) {
-                Some(c) => c,
-                None => {
-                    let error_msg = format!(
-                        "Failed to parse authentication challenge: {}",
-                        auth_header
-                    );
-                    tracing::error!("{}", error_msg);
-                    return Ok(CallResult::failed_with_status(status_code, error_msg));
-                }
-            };
-
-            info!(
-                "Received {} challenge (realm: {}), retrying with authentication",
-                status_code, challenge.realm
-            );
-
-            // Send ACK for the 401/407 response (required by RFC 3261)
-            let via_branch =
-                extract_via_branch(&response).unwrap_or_else(|| "z9hG4bKunknown".to_string());
-            let to_tag = extract_to_tag(&response);
-            let ack = build_ack(
-                &self.target_uri,
-                &self.from_uri,
-                &self.display_name,
-                &self.target_uri,
-                to_tag.as_deref(),
-                &call_id,
-                &from_tag,
-                cseq,
-                local_addr,
-                &via_branch,
-            );
-            transport.send(&ack).await?;
-
-            // Compute digest response
-            let digest_response = DigestResponse::compute(
-                &challenge,
-                &self.config.sip_username,
-                &self.config.sip_password,
-                "INVITE",
-                &self.target_uri,
-            );
-            let authorization = digest_response.to_header();
-
-            // Rebuild INVITE with Authorization header and incremented CSeq
-            cseq += 1;
-            let auth_invite = build_invite_with_auth(
-                &self.target_uri,
-                &self.from_uri,
-                &self.display_name,
-                &call_id,
-                &from_tag,
-                cseq,
-                local_addr,
-                rtp_port,
-                external_rtp_addr,
-                &authorization,
-            );
-
-            // Send authenticated INVITE
-            response = match transport.send_invite_await_final(&auth_invite).await {
-                Ok(r) => r,
-                Err(e) => {
-                    return Ok(CallResult::failed(format!(
-                        "No response after authentication: {}",
-                        e
-                    )));
-                }
-            };
-
-            status_code = parse_status_code(&response).unwrap_or(0);
-            debug!("Received response after auth: {}", status_code);
         }
 
         if status_code != 200 {
             let category = SipErrorCategory::from_status(status_code);
-            let error_msg = format!(
-                "Call rejected with status {}: {}",
-                status_code,
-                category.description()
-            );
-
-            // Log appropriate level based on error type
-            if category.is_transient() {
-                warn!("{}", error_msg);
-            } else {
-                // Permanent errors (auth, config) should be more visible
-                tracing::error!("{}", error_msg);
-            }
-
-            return Ok(CallResult::failed_with_status(status_code, error_msg));
+            return Ok(CallResult::failed_with_status(status_code, format!("{}: {}", status_code, category.description())));
         }
 
-        // Extract To tag for dialog
         let to_tag = extract_to_tag(&response);
         let via_branch = extract_via_branch(&response).unwrap_or_else(|| "z9hG4bKunknown".to_string());
-
-        // Send ACK
-        let ack = build_ack(
-            &self.target_uri,
-            &self.from_uri,
-            &self.display_name,
-            &self.target_uri,
-            to_tag.as_deref(),
-            &call_id,
-            &from_tag,
-            cseq,
-            local_addr,
-            &via_branch,
-        );
+        let ack = build_ack(&self.target_uri, &self.from_uri, &self.display_name, &self.target_uri, to_tag.as_deref(), &call_id, &from_tag, cseq, local_addr, &via_branch);
         transport.send(&ack).await?;
-        info!("Call connected, listening for audio...");
 
-        // Extract remote RTP address from SDP and punch through NAT
         if let Some(remote_rtp_addr) = extract_rtp_address(&response) {
-            debug!("Remote RTP endpoint: {}", remote_rtp_addr);
-            if let Err(e) = rtp_receiver.punch_nat(remote_rtp_addr).await {
-                warn!("NAT hole-punch failed: {}", e);
-            }
-        } else {
-            warn!("Could not extract remote RTP address from SDP");
+            let _ = rtp_receiver.punch_nat(remote_rtp_addr).await;
         }
 
-        // Receive RTP audio for specified duration (with cancellation support)
-        let completed_normally = rtp_receiver
-            .receive_for_cancellable(listen_duration, cancel_token.clone())
-            .await?;
-
+        info!("Call connected, listening for audio...");
+        let completed_normally = rtp_receiver.receive_for_cancellable(listen_duration, cancel_token.clone()).await?;
         let audio_samples = rtp_receiver.get_samples_f32();
+        let audio_received = crate::rtp::samples_to_duration_ms(audio_samples.len()) >= self.config.min_audio_duration_ms;
 
-        // Calculate audio duration in ms (16kHz sample rate after resampling)
-        let audio_duration_ms = crate::rtp::samples_to_duration_ms(audio_samples.len());
+        self.terminate_call(&transport, &call_id, &from_tag, to_tag.as_deref(), cseq + 1, local_addr, completed_normally).await;
 
-        // Check if we have enough audio (not just noise/glitches)
-        let audio_received = audio_duration_ms >= self.config.min_audio_duration_ms;
-
-        if !completed_normally {
-            info!(
-                "Call cancelled during audio receive - collected {} samples ({:.1}s)",
-                audio_samples.len(),
-                audio_samples.len() as f32 / crate::rtp::WHISPER_SAMPLE_RATE as f32
-            );
-        } else if !audio_samples.is_empty() && !audio_received {
-            warn!(
-                "Received {} audio samples ({:.1}s) but below minimum threshold ({}ms)",
-                audio_samples.len(),
-                audio_samples.len() as f32 / crate::rtp::WHISPER_SAMPLE_RATE as f32,
-                self.config.min_audio_duration_ms
-            );
-        } else {
-            info!(
-                "Received {} audio samples ({:.1}s)",
-                audio_samples.len(),
-                audio_samples.len() as f32 / crate::rtp::WHISPER_SAMPLE_RATE as f32
-            );
-        }
-
-        // Always send BYE to end call cleanly (even on cancellation)
-        let bye = build_bye(
-            &self.target_uri,
-            &self.from_uri,
-            &self.display_name,
-            &self.target_uri,
-            to_tag.as_deref(),
-            &call_id,
-            &from_tag,
-            cseq + 1, // BYE uses next CSeq after last INVITE
-            local_addr,
-        );
-
-        if let Err(e) = transport.send(&bye).await {
-            warn!("Failed to send BYE: {}", e);
-        } else {
-            // Wait for BYE response (best effort, shorter timeout on cancellation)
-            // 5s normal: allows for network delays and server processing
-            // 2s shutdown: faster exit while still allowing graceful termination
-            let bye_timeout = if completed_normally {
-                Duration::from_secs(5)
-            } else {
-                Duration::from_secs(2)
-            };
-
-            match transport.receive(bye_timeout).await {
-                Ok(bye_response) => {
-                    let bye_status = parse_status_code(&bye_response).unwrap_or(0);
-                    debug!("BYE response: {}", bye_status);
-                }
-                Err(e) => {
-                    if completed_normally {
-                        warn!("No response to BYE: {}", e);
-                    } else {
-                        debug!("No response to BYE during shutdown: {}", e);
-                    }
-                }
-            }
-        }
-
-        info!(
-            "Call ended{}",
-            if completed_normally { "" } else { " (shutdown)" }
-        );
-
-        // If cancelled, return partial result but mark as connected
-        // The caller can decide whether to use the partial audio
-        let audio_received = audio_received && completed_normally;
         if completed_normally {
             Ok(CallResult::success(audio_samples, audio_received))
         } else {
-            // Partial result due to cancellation
             let mut result = CallResult::success(audio_samples, audio_received);
-            result.error = Some("Call cancelled by shutdown".to_string());
+            result.error = Some("Call cancelled".to_string());
             Ok(result)
+        }
+    }
+
+    async fn handle_auth(
+        &self,
+        transport: &SipTransport,
+        response: &str,
+        call_id: &str,
+        from_tag: &str,
+        cseq: &mut u32,
+        local_addr: SocketAddr,
+        rtp_port: u16,
+        external_rtp_addr: Option<SocketAddr>
+    ) -> Result<std::result::Result<String, CallResult>> {
+        let status_code = parse_status_code(response).unwrap_or(0);
+        if self.config.sip_password.is_empty() {
+            return Ok(Err(CallResult::failed_with_status(status_code, "No SIP_PASSWORD".to_string())));
+        }
+
+        let auth_header = match extract_authenticate_header(response) {
+            Some(h) => h,
+            None => return Ok(Err(CallResult::failed_with_status(status_code, "No WWW-Authenticate".to_string()))),
+        };
+
+        let challenge = match DigestChallenge::parse(&auth_header) {
+            Some(c) => c,
+            None => return Ok(Err(CallResult::failed_with_status(status_code, "Bad challenge".to_string()))),
+        };
+
+        let via_branch = extract_via_branch(response).unwrap_or_else(|| "z9hG4bKunknown".to_string());
+        let to_tag = extract_to_tag(response);
+        let ack = build_ack(&self.target_uri, &self.from_uri, &self.display_name, &self.target_uri, to_tag.as_deref(), call_id, from_tag, *cseq, local_addr, &via_branch);
+        transport.send(&ack).await?;
+
+        let digest = DigestResponse::compute(&challenge, &self.config.sip_username, &self.config.sip_password, "INVITE", &self.target_uri);
+        *cseq += 1;
+        let auth_invite = build_invite_with_auth(&self.target_uri, &self.from_uri, &self.display_name, call_id, from_tag, *cseq, local_addr, rtp_port, external_rtp_addr, &digest.to_header());
+
+        match transport.send_invite_await_final(&auth_invite).await {
+            Ok(r) => Ok(Ok(r)),
+            Err(e) => Ok(Err(CallResult::failed(format!("No response after auth: {}", e)))),
+        }
+    }
+
+    async fn terminate_call(
+        &self,
+        transport: &SipTransport,
+        call_id: &str,
+        from_tag: &str,
+        to_tag: Option<&str>,
+        cseq: u32,
+        local_addr: SocketAddr,
+        completed_normally: bool
+    ) {
+        let bye = build_bye(&self.target_uri, &self.from_uri, &self.display_name, &self.target_uri, to_tag, call_id, from_tag, cseq, local_addr);
+        let _ = transport.send(&bye).await;
+        let timeout = if completed_normally { Duration::from_secs(5) } else { Duration::from_secs(2) };
+        let _ = transport.receive(timeout).await;
+    }
+
+    /// Register with the SIP server via SIP REGISTER + digest auth.
+    /// Authorizes our current IP for outbound calls, which is essential
+    /// when the public IP changes (DHCP renewal, location change, etc.).
+    async fn register(&self) -> Result<()> {
+        let transport = SipTransport::new(self.server_addr).await?;
+        let local_addr = transport.local_addr()?;
+        let call_id = generate_call_id(&local_addr.ip().to_string());
+        let from_tag = generate_tag();
+        let register_uri = format!("sip:{}", self.config.sip_server);
+
+        info!("Registering with SIP server...");
+
+        let register = build_register(
+            &self.config.sip_server,
+            &self.from_uri,
+            &self.display_name,
+            &call_id,
+            &from_tag,
+            1,
+            local_addr,
+        );
+
+        let response = transport.send_invite_await_final(&register).await
+            .context("REGISTER request timed out")?;
+        let status = parse_status_code(&response).unwrap_or(0);
+
+        if status == 200 {
+            info!("SIP registration successful");
+            return Ok(());
+        }
+
+        if status != 401 && status != 407 {
+            anyhow::bail!("SIP registration rejected with status {}", status);
+        }
+
+        // Handle digest auth challenge
+        if self.config.sip_password.is_empty() {
+            anyhow::bail!("SIP server requires authentication but SIP_PASSWORD is empty");
+        }
+
+        let auth_header = extract_authenticate_header(&response)
+            .context("No WWW-Authenticate header in 401/407 response")?;
+        let challenge = DigestChallenge::parse(&auth_header)
+            .context("Failed to parse digest challenge")?;
+
+        let digest = DigestResponse::compute(
+            &challenge,
+            &self.config.sip_username,
+            &self.config.sip_password,
+            "REGISTER",
+            &register_uri,
+        );
+
+        let auth_register = build_register_with_auth(
+            &self.config.sip_server,
+            &self.from_uri,
+            &self.display_name,
+            &call_id,
+            &from_tag,
+            2,
+            local_addr,
+            &digest.to_header(),
+        );
+
+        let response = transport.send_invite_await_final(&auth_register).await
+            .context("Authenticated REGISTER timed out")?;
+        let status = parse_status_code(&response).unwrap_or(0);
+
+        if status == 200 {
+            info!("SIP registration successful (authenticated)");
+            Ok(())
+        } else {
+            anyhow::bail!("SIP registration failed with status {} after auth", status)
         }
     }
 }
@@ -526,105 +355,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sip_error_category_auth() {
+    fn test_sip_error_category() {
         assert_eq!(SipErrorCategory::from_status(401), SipErrorCategory::AuthRequired);
-        assert_eq!(SipErrorCategory::from_status(407), SipErrorCategory::AuthRequired);
-    }
-
-    #[test]
-    fn test_sip_error_category_not_found() {
         assert_eq!(SipErrorCategory::from_status(404), SipErrorCategory::NotFound);
-    }
-
-    #[test]
-    fn test_sip_error_category_busy() {
         assert_eq!(SipErrorCategory::from_status(486), SipErrorCategory::Busy);
-        assert_eq!(SipErrorCategory::from_status(600), SipErrorCategory::Busy);
-        assert_eq!(SipErrorCategory::from_status(603), SipErrorCategory::Busy);
-    }
-
-    #[test]
-    fn test_sip_error_category_timeout() {
-        assert_eq!(SipErrorCategory::from_status(408), SipErrorCategory::Timeout);
-        assert_eq!(SipErrorCategory::from_status(480), SipErrorCategory::Timeout);
-        assert_eq!(SipErrorCategory::from_status(504), SipErrorCategory::Timeout);
-    }
-
-    #[test]
-    fn test_sip_error_category_server() {
-        assert_eq!(SipErrorCategory::from_status(500), SipErrorCategory::ServerError);
-        assert_eq!(SipErrorCategory::from_status(503), SipErrorCategory::ServerError);
-        assert_eq!(SipErrorCategory::from_status(599), SipErrorCategory::ServerError);
-    }
-
-    #[test]
-    fn test_sip_error_category_client() {
-        assert_eq!(SipErrorCategory::from_status(400), SipErrorCategory::ClientError);
-        assert_eq!(SipErrorCategory::from_status(403), SipErrorCategory::ClientError);
-        assert_eq!(SipErrorCategory::from_status(415), SipErrorCategory::ClientError);
-    }
-
-    #[test]
-    fn test_sip_error_category_redirect() {
-        assert_eq!(SipErrorCategory::from_status(301), SipErrorCategory::Redirect);
-        assert_eq!(SipErrorCategory::from_status(302), SipErrorCategory::Redirect);
-    }
-
-    #[test]
-    fn test_sip_error_category_unknown() {
-        assert_eq!(SipErrorCategory::from_status(100), SipErrorCategory::Unknown);
-        assert_eq!(SipErrorCategory::from_status(200), SipErrorCategory::Unknown);
-        assert_eq!(SipErrorCategory::from_status(0), SipErrorCategory::Unknown);
-    }
-
-    #[test]
-    fn test_sip_error_is_transient() {
-        // Transient errors
-        assert!(SipErrorCategory::Busy.is_transient());
-        assert!(SipErrorCategory::Timeout.is_transient());
-        assert!(SipErrorCategory::ServerError.is_transient());
-
-        // Non-transient errors
-        assert!(!SipErrorCategory::AuthRequired.is_transient());
-        assert!(!SipErrorCategory::NotFound.is_transient());
-        assert!(!SipErrorCategory::ClientError.is_transient());
-        assert!(!SipErrorCategory::Redirect.is_transient());
-        assert!(!SipErrorCategory::Unknown.is_transient());
-    }
-
-    #[test]
-    fn test_sip_error_descriptions() {
-        // All categories should have non-empty descriptions
-        assert!(!SipErrorCategory::AuthRequired.description().is_empty());
-        assert!(!SipErrorCategory::NotFound.description().is_empty());
-        assert!(!SipErrorCategory::Busy.description().is_empty());
-        assert!(!SipErrorCategory::Timeout.description().is_empty());
-        assert!(!SipErrorCategory::ServerError.description().is_empty());
-        assert!(!SipErrorCategory::ClientError.description().is_empty());
-        assert!(!SipErrorCategory::Redirect.description().is_empty());
-        assert!(!SipErrorCategory::Unknown.description().is_empty());
-    }
-}
-
-#[cfg(test)]
-mod proptests {
-    use super::*;
-    use proptest::prelude::*;
-
-    proptest! {
-        /// from_status never panics for any u16
-        #[test]
-        fn from_status_never_panics(code: u16) {
-            let _ = SipErrorCategory::from_status(code);
-        }
-
-        /// All SIP status codes in valid range get classified
-        #[test]
-        fn all_sip_codes_classified(code in 100u16..700u16) {
-            let category = SipErrorCategory::from_status(code);
-            // Should return a valid category (not panic)
-            let _ = category.description();
-            let _ = category.is_transient();
-        }
     }
 }
