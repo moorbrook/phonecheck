@@ -385,6 +385,27 @@ pub fn extract_via_branch(response: &str) -> Option<String> {
     None
 }
 
+/// Extract the `received` parameter from Via header.
+/// This is our public IP as seen by the SIP server — more reliable than STUN
+/// under CGNAT where different destinations see different public IPs.
+pub fn extract_via_received(response: &str) -> Option<std::net::IpAddr> {
+    for line in response.lines() {
+        if line.to_lowercase().starts_with("via:") {
+            if let Some(pos) = line.to_lowercase().find("received=") {
+                let start = pos + 9;
+                let value = &line[start..];
+                let end = value
+                    .find([';', ',', ' ', '\r', '\n'])
+                    .unwrap_or(value.len());
+                if let Ok(ip) = value[..end].parse() {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Extract remote RTP address from SDP in SIP response
 /// Parses c= (connection) and m= (media) lines to get IP and port
 pub fn extract_rtp_address(response: &str) -> Option<std::net::SocketAddr> {

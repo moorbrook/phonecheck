@@ -126,14 +126,18 @@ impl SipClient {
         listen_duration: Duration,
         cancel_token: CancellationToken,
     ) -> Result<CallResult> {
+        let rtp_receiver = RtpReceiver::bind(0).await?;
+        // Create transport once — REGISTER and INVITE must use the same source
+        // port so the SIP server's NAT pinhole / IP authorization applies to both.
+        let transport = SipTransport::new(self.server_addr).await?;
+
         // Register with SIP server to authorize our IP for outbound calls.
         // This is essential when public IP changes (DHCP, location change).
         // Non-fatal: if registration fails, we still attempt the call.
-        if let Err(e) = self.register().await {
+        if let Err(e) = self.register_with_transport(&transport).await {
             warn!("SIP registration failed: {} - proceeding with call attempt", e);
         }
-        let rtp_receiver = RtpReceiver::bind(0).await?;
-        self.make_test_call_with_receiver(listen_duration, rtp_receiver, cancel_token).await
+        self.make_test_call_with_receiver(listen_duration, rtp_receiver, cancel_token, transport).await
     }
 
     pub async fn make_test_call_with_receiver(
@@ -141,9 +145,9 @@ impl SipClient {
         listen_duration: Duration,
         mut rtp_receiver: RtpReceiver,
         cancel_token: CancellationToken,
+        transport: SipTransport,
     ) -> Result<CallResult> {
         let rtp_port = rtp_receiver.local_port()?;
-        let transport = SipTransport::new(self.server_addr).await?;
         let local_addr = transport.local_addr()?;
         let call_id = generate_call_id(&local_addr.ip().to_string());
         let from_tag = generate_tag();
@@ -151,19 +155,34 @@ impl SipClient {
 
         info!("Initiating call to {}", self.config.target_phone);
 
-        let external_rtp_addr = if let Some(ref stun_server) = self.config.stun_server {
-            match rtp_receiver.discover_public_address(stun_server).await {
-                Ok(addr) => {
-                    info!("STUN discovered public RTP address: {}", addr);
-                    Some(addr)
-                }
-                Err(e) => {
-                    warn!("STUN discovery for RTP failed: {}", e);
+        // Determine public RTP address for SDP.
+        // Under CGNAT, each local socket gets a different external port per destination.
+        // We discover our actual external address by sending SIP OPTIONS from the RTP
+        // socket to the SIP server, which tells us the exact IP:port the server sees.
+        // This is critical because STUN to a different server gives a useless mapping,
+        // and the local port bears no relation to the CGNAT-mapped external port.
+        let external_rtp_addr = match rtp_receiver.discover_cgnat_mapping(self.server_addr).await {
+            Ok(addr) => {
+                info!("CGNAT probe: server sees RTP socket as {}", addr);
+                Some(addr)
+            }
+            Err(e) => {
+                warn!("CGNAT probe failed: {} - falling back to STUN", e);
+                if let Some(ref stun_server) = self.config.stun_server {
+                    match rtp_receiver.discover_public_address(stun_server).await {
+                        Ok(addr) => {
+                            info!("STUN discovered public RTP address: {}", addr);
+                            Some(addr)
+                        }
+                        Err(e) => {
+                            warn!("STUN discovery for RTP failed: {}", e);
+                            None
+                        }
+                    }
+                } else {
                     None
                 }
             }
-        } else {
-            None
         };
 
         let invite = build_invite(&self.target_uri, &self.from_uri, &self.display_name, &call_id, &from_tag, cseq, local_addr, rtp_port, external_rtp_addr);
@@ -196,14 +215,23 @@ impl SipClient {
         let ack = build_ack(&self.target_uri, &self.from_uri, &self.display_name, &self.target_uri, to_tag.as_deref(), &call_id, &from_tag, cseq, local_addr, &via_branch);
         transport.send(&ack).await?;
 
-        if let Some(remote_rtp_addr) = extract_rtp_address(&response) {
-            let _ = rtp_receiver.punch_nat(remote_rtp_addr).await;
+        let remote_rtp_addr = extract_rtp_address(&response);
+        if let Some(addr) = remote_rtp_addr {
+            info!("Remote media address from SDP: {}", addr);
+            let _ = rtp_receiver.punch_nat(addr).await;
+        } else {
+            warn!("No media address found in SDP!");
         }
 
-        info!("Call connected, listening for audio...");
-        let completed_normally = rtp_receiver.receive_for_cancellable(listen_duration, cancel_token.clone()).await?;
+        info!("Call connected, listening for audio (local RTP port {})...", rtp_port);
+        let completed_normally = if let Some(addr) = remote_rtp_addr {
+            rtp_receiver.receive_for_with_keepalive(listen_duration, cancel_token.clone(), addr).await?
+        } else {
+            rtp_receiver.receive_for_cancellable(listen_duration, cancel_token.clone()).await?
+        };
         let audio_samples = rtp_receiver.get_samples_f32();
         let audio_received = crate::rtp::samples_to_duration_ms(audio_samples.len()) >= self.config.min_audio_duration_ms;
+        info!("Audio capture complete: {} samples ({} ms), audio_received={}", audio_samples.len(), crate::rtp::samples_to_duration_ms(audio_samples.len()), audio_received);
 
         self.terminate_call(&transport, &call_id, &from_tag, to_tag.as_deref(), cseq + 1, local_addr, completed_normally).await;
 
@@ -276,8 +304,8 @@ impl SipClient {
     /// Register with the SIP server via SIP REGISTER + digest auth.
     /// Authorizes our current IP for outbound calls, which is essential
     /// when the public IP changes (DHCP renewal, location change, etc.).
-    async fn register(&self) -> Result<()> {
-        let transport = SipTransport::new(self.server_addr).await?;
+    /// Uses the provided transport so the INVITE reuses the same source port.
+    async fn register_with_transport(&self, transport: &SipTransport) -> Result<()> {
         let local_addr = transport.local_addr()?;
         let call_id = generate_call_id(&local_addr.ip().to_string());
         let from_tag = generate_tag();

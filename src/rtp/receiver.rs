@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use rand::Rng;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
@@ -62,6 +63,66 @@ impl RtpReceiver {
         crate::stun::discover_public_address_tokio(&self.socket, stun_server).await
     }
 
+    /// Discover our CGNAT-mapped external address by sending a SIP OPTIONS
+    /// from this socket to the SIP server. Under CGNAT, this reveals the
+    /// external IP:port the server sees when we send from this socket.
+    /// This is critical because CGNAT assigns different external ports per
+    /// local socket, and STUN to a different server gives a useless mapping.
+    pub async fn discover_cgnat_mapping(&self, sip_server: std::net::SocketAddr) -> Result<std::net::SocketAddr> {
+        use std::time::Duration;
+        let local_port = self.socket.local_addr()?.port();
+        let branch = format!("z9hG4bK{:016x}", rand::thread_rng().gen::<u64>());
+        let tag = format!("{:08x}", rand::thread_rng().gen::<u32>());
+        let call_id = format!("{:016x}@cgnat-probe", rand::thread_rng().gen::<u64>());
+
+        let options = format!(
+            "OPTIONS sip:ping@{} SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 0.0.0.0:{};branch={};rport\r\n\
+             From: <sip:probe@cgnat>;tag={}\r\n\
+             To: <sip:ping@{}>\r\n\
+             Call-ID: {}\r\n\
+             CSeq: 1 OPTIONS\r\n\
+             Max-Forwards: 70\r\n\
+             Content-Length: 0\r\n\
+             \r\n",
+            sip_server, local_port, branch, tag, sip_server.ip(), call_id
+        );
+
+        self.socket.send_to(options.as_bytes(), sip_server).await?;
+
+        let mut buf = [0u8; 4096];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(5), self.socket.recv_from(&mut buf))
+            .await
+            .map_err(|_| anyhow::anyhow!("CGNAT probe timeout"))?
+            .map_err(|e| anyhow::anyhow!("CGNAT probe recv error: {}", e))?;
+
+        let response = std::str::from_utf8(&buf[..len])
+            .map_err(|_| anyhow::anyhow!("CGNAT probe: non-UTF8 response"))?;
+
+        // Parse Via header for received= and rport=
+        let mut received_ip: Option<std::net::IpAddr> = None;
+        let mut rport: Option<u16> = None;
+        for line in response.lines() {
+            if line.to_lowercase().starts_with("via:") {
+                for part in line.split(';') {
+                    let part = part.trim();
+                    if let Some(val) = part.strip_prefix("received=") {
+                        received_ip = val.parse().ok();
+                    } else if let Some(val) = part.strip_prefix("rport=") {
+                        rport = val.trim().parse().ok();
+                    }
+                }
+                break; // only first Via
+            }
+        }
+
+        match (received_ip, rport) {
+            (Some(ip), Some(port)) => Ok(std::net::SocketAddr::new(ip, port)),
+            (Some(ip), None) => Err(anyhow::anyhow!("CGNAT probe: got received={} but no rport", ip)),
+            _ => Err(anyhow::anyhow!("CGNAT probe: no received/rport in Via header")),
+        }
+    }
+
     /// Send empty RTP packets to punch through NAT
     pub async fn punch_nat(&self, remote_addr: std::net::SocketAddr) -> Result<()> {
         info!("Sending NAT hole-punch packets to {}", remote_addr);
@@ -86,15 +147,47 @@ impl RtpReceiver {
         Ok(())
     }
 
-    /// Receive RTP packets for the specified duration with cancellation support
+    /// Receive RTP packets for the specified duration with cancellation support.
+    /// If `keepalive_target` is provided, continuously sends keepalive RTP packets
+    /// to that address every 20ms to maintain NAT/CGNAT mappings.
     pub async fn receive_for_cancellable(
         &mut self,
         duration: Duration,
         cancel_token: CancellationToken,
     ) -> Result<bool> {
+        self.receive_for_impl(duration, cancel_token, None).await
+    }
+
+    /// Like receive_for_cancellable but with continuous NAT keepalive packets
+    pub async fn receive_for_with_keepalive(
+        &mut self,
+        duration: Duration,
+        cancel_token: CancellationToken,
+        keepalive_target: std::net::SocketAddr,
+    ) -> Result<bool> {
+        self.receive_for_impl(duration, cancel_token, Some(keepalive_target)).await
+    }
+
+    async fn receive_for_impl(
+        &mut self,
+        duration: Duration,
+        cancel_token: CancellationToken,
+        keepalive_target: Option<std::net::SocketAddr>,
+    ) -> Result<bool> {
         let mut buf = [0u8; 2048];
         let deadline = tokio::time::Instant::now() + duration;
         let mut cancelled = false;
+        let mut packet_count: u32 = 0;
+        let mut first_packet_logged = false;
+        let mut keepalive_seq: u16 = 100;
+        let mut last_keepalive = tokio::time::Instant::now();
+        let keepalive_interval = Duration::from_millis(20);
+
+        // Build a reusable keepalive packet (minimal RTP header)
+        let mut keepalive_pkt = [0u8; 12];
+        keepalive_pkt[0] = 0x80; // V=2
+        keepalive_pkt[1] = 0x00; // PT=0 (PCMU)
+        keepalive_pkt[8..12].copy_from_slice(&[0x00, 0x00, 0x00, 0x01]); // SSRC
 
         loop {
             if cancel_token.is_cancelled() {
@@ -108,10 +201,27 @@ impl RtpReceiver {
                 break;
             }
 
+            // Send keepalive if interval elapsed
+            if let Some(target) = keepalive_target {
+                if last_keepalive.elapsed() >= keepalive_interval {
+                    keepalive_pkt[2..4].copy_from_slice(&keepalive_seq.to_be_bytes());
+                    let ts = (keepalive_seq as u32) * 160;
+                    keepalive_pkt[4..8].copy_from_slice(&ts.to_be_bytes());
+                    let _ = self.socket.send_to(&keepalive_pkt, target).await;
+                    keepalive_seq = keepalive_seq.wrapping_add(1);
+                    last_keepalive = tokio::time::Instant::now();
+                }
+            }
+
             tokio::select! {
-                result = timeout(remaining.min(Duration::from_millis(100)), self.socket.recv_from(&mut buf)) => {
+                result = timeout(remaining.min(Duration::from_millis(20)), self.socket.recv_from(&mut buf)) => {
                     match result {
-                        Ok(Ok((len, _addr))) => {
+                        Ok(Ok((len, addr))) => {
+                            packet_count += 1;
+                            if !first_packet_logged {
+                                info!("First RTP packet received: {} bytes from {}", len, addr);
+                                first_packet_logged = true;
+                            }
                             if len >= 12 {
                                 self.process_packet(&buf[..len]);
                             }
@@ -130,6 +240,7 @@ impl RtpReceiver {
             }
         }
 
+        info!("RTP receive done: {} packets received, {} i16 samples decoded", packet_count, self.samples.len());
         self.flush_jitter_buffer();
         Ok(!cancelled)
     }
