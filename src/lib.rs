@@ -4,9 +4,8 @@
 
 pub mod cli;
 pub mod config;
-pub mod embedding;
+pub mod greeting;
 pub mod health;
-pub mod model_manager;
 pub mod notify;
 pub mod orchestrator;
 pub mod redact;

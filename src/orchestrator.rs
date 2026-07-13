@@ -16,7 +16,7 @@ use crate::speech::{CheckResult, SpeechRecognizer};
 /// Run a single PBX health check
 pub async fn run_check(
     config: &Arc<Config>,
-    recognizer_mutex: &std::sync::Mutex<SpeechRecognizer>,
+    recognizer: &SpeechRecognizer,
     notifier: &Notifier,
     health_metrics: &HealthMetrics,
     cancel_token: CancellationToken,
@@ -45,12 +45,10 @@ pub async fn run_check(
         save_audio(&call_result.audio_samples, path);
     }
 
-    // Transcription (helper subprocess) + ONNX embedding can take seconds.
-    // Run them via block_in_place so the async runtime (health server, shutdown
-    // signal handling) stays responsive instead of stalling a worker thread.
-    let check_result = match run_cpu_bound(|| {
-        process_audio(recognizer_mutex, &call_result.audio_samples)
-    }) {
+    // Transcription (helper subprocess) can take seconds. Run it via
+    // block_in_place so the async runtime (health server, shutdown signal
+    // handling) stays responsive instead of stalling a worker thread.
+    let check_result = match run_cpu_bound(|| recognizer.check_audio(&call_result.audio_samples)) {
         Ok(res) => res,
         Err(e) => {
             handle_failure(
@@ -63,7 +61,13 @@ pub async fn run_check(
         }
     };
 
-    report_result(check_result, health_metrics, notifier).await;
+    report_result(
+        check_result,
+        &config.expected_greeting,
+        health_metrics,
+        notifier,
+    )
+    .await;
 }
 
 async fn perform_call(config: &Arc<Config>, cancel_token: CancellationToken) -> Result<CallResult> {
@@ -144,36 +148,29 @@ fn run_cpu_bound<T>(f: impl FnOnce() -> T) -> T {
     }
 }
 
-fn process_audio(
-    recognizer_mutex: &std::sync::Mutex<SpeechRecognizer>,
-    samples: &[f32],
-) -> Result<CheckResult> {
-    let mut recognizer = recognizer_mutex
-        .lock()
-        .map_err(|e| anyhow::anyhow!("Failed to lock recognizer: {}", e))?;
-    recognizer.check_audio(samples)
-}
-
-async fn report_result(result: CheckResult, health_metrics: &HealthMetrics, notifier: &Notifier) {
+async fn report_result(
+    result: CheckResult,
+    expected_greeting: &str,
+    health_metrics: &HealthMetrics,
+    notifier: &Notifier,
+) {
     info!("Transcribed: \"{}\"", result.transcript);
-    if let Some(similarity) = result.similarity {
-        info!("Embedding similarity: {:.4}", similarity);
-    }
+    info!("Transcript similarity: {:.3}", result.similarity);
 
-    if result.phrase_found {
-        info!("SUCCESS: Expected phrase detected - PBX is healthy");
+    if result.greeting_found {
+        info!("SUCCESS: Expected greeting detected - PBX is healthy");
         health_metrics.record_success();
     } else {
         warn!(
-            "ALERT: Expected phrase NOT detected. Heard: \"{}\", similarity: {:?}",
-            result.transcript, result.similarity
+            "ALERT: Expected greeting NOT detected. Expected: \"{}\", heard: \"{}\", similarity: {:.3}",
+            expected_greeting, result.transcript, result.similarity
         );
         handle_failure(
             health_metrics,
             notifier,
             &format!(
-                "PhoneCheck ALERT: Expected greeting not detected. Heard: \"{}\"",
-                result.transcript
+                "PhoneCheck ALERT: Expected greeting not detected (similarity {:.2}).\nExpected: \"{}\"\nHeard: \"{}\"",
+                result.similarity, expected_greeting, result.transcript
             ),
         )
         .await;

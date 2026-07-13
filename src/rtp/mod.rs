@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 /// Target audio sample rate for speech processing (Hz)
-/// Required by both the Wav2Vec2 embedder and the transcription helper input.
+/// Required by the SpeechAnalyzer transcription helper input.
 pub const TARGET_SAMPLE_RATE: u32 = 16000;
 
 /// Convert duration in milliseconds to number of samples at 16kHz

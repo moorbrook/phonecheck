@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PhoneCheck is a PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, captures the audio greeting, and uses Wav2Vec2 audio embeddings for semantic matching. Sends push notifications via Pushover if the expected greeting is not detected.
+PhoneCheck is a PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, captures the audio greeting, transcribes it with Apple's SpeechAnalyzer, and fuzzy-matches the transcript against the expected greeting text (`EXPECTED_GREETING`). Sends push notifications via Pushover if the expected greeting is not detected.
 
 ## Build Commands
 
@@ -14,7 +14,7 @@ uses Apple's SpeechAnalyzer (Speech framework) via a Swift helper subprocess
 (or manually: `sh scripts/build_speech_helper.sh`).
 
 ```bash
-# Build (compiles the SpeechAnalyzer helper via swiftc; ONNX Runtime is statically linked)
+# Build (compiles the SpeechAnalyzer helper via swiftc)
 cargo build --release
 
 # Run tests
@@ -38,7 +38,8 @@ src/
 ├── config.rs        # Environment variable loading, validation
 ├── scheduler.rs     # Business hours scheduling (8am-5pm Pacific), graceful shutdown
 ├── redact.rs        # PII redaction for logging (phone numbers, emails, SIP URIs)
-├── embedding.rs     # Wav2Vec2 audio embeddings for semantic matching
+├── speech.rs        # SpeechAnalyzer helper subprocess (WAV in → JSON transcript out)
+├── greeting.rs      # Transcript vs expected-greeting matching (token-level similarity)
 ├── health.rs        # HTTP health check server (/health, /ready, /metrics)
 ├── stun.rs          # STUN client for NAT traversal (RFC 5389)
 ├── notify.rs        # Pushover push notification integration
@@ -62,10 +63,9 @@ src/
 3. **NAT Traversal** → STUN discovery + RTP hole punching for audio behind NAT
 4. **Decode** → PCM i16 → jitter buffer reordering
 5. **Resample** → 8kHz → 16kHz f32 (Rubato FFT-based)
-6. **SpeechAnalyzer** → transcribe for logging/debugging (helper subprocess: WAV in → JSON transcript out)
-7. **Wav2Vec2** → compute 768-dimensional embedding (mean pooled, L2 normalized)
-8. **Match** → cosine similarity vs reference embedding (threshold: 0.75)
-9. **Alert** → Pushover push notification if similarity < 0.75
+6. **SpeechAnalyzer** → transcribe (helper subprocess: WAV in → JSON transcript out)
+7. **Match** → normalized token-level similarity between transcript and EXPECTED_GREETING (threshold: GREETING_MATCH_THRESHOLD, default 0.75)
+8. **Alert** → Pushover push notification (includes expected vs heard text) if below threshold
 
 ## Configuration
 
@@ -78,28 +78,23 @@ Copy `.env.example` to `.env` and configure:
 - **Speech helper**: SPEECH_HELPER_PATH (default `./native/speech_helper`, built by `cargo build`)
 
 ### Optional
+- **Greeting**: EXPECTED_GREETING (expected greeting text; default "thank you for calling cubic machinery"), GREETING_MATCH_THRESHOLD (similarity threshold in (0.0, 1.0]; default 0.75)
 - **Audio settings**: LISTEN_DURATION_SECS (default: 10), MIN_AUDIO_DURATION_MS (default: 500)
 - **STUN**: STUN_SERVER (e.g., stun.l.google.com:19302) for NAT traversal
 - **Health server**: HEALTH_PORT (exposes /health, /ready, /metrics endpoints)
 - **Logging**: RUST_LOG (default: info)
 
-### Important Notes
-- **Similarity threshold is hardcoded at 0.75** - do not make this configurable to avoid option paralysis
-- First successful check captures and caches the reference embedding to `models/reference_embedding.bin`
-- Delete reference_embedding.bin to capture a new baseline
-
 ## Dependencies
 
 - **Speech framework (macOS 26+)**: SpeechAnalyzer/SpeechTranscriber for transcription; the en-US model is an OS-managed system asset (AssetInventory) — nothing is bundled or downloaded by the app
-- **ort (ONNX Runtime)**: Statically linked (~50MB), no runtime dependency
 - **Rubato**: FFT-based audio resampling
 - G.711 lookup tables sourced from [zaf/g711](https://github.com/zaf/g711)
 
 ## Testing
 
-- **Unit tests**: Comprehensive coverage of all modules
+- **Unit tests**: Comprehensive coverage of all modules, including the greeting matcher (typos, word drops, truncation, wrong text, empty transcript)
 - **Property-based tests**: proptest for config parsing, redaction, resampling, SIP errors
-- **Snapshot tests**: insta for embedding similarity decisions and audio matching
+- **Integration tests**: tests/transcription.rs runs the real SpeechAnalyzer helper against test_audio.wav and scores the transcript
 - **Formal verification**: Kani proofs for critical invariants (redaction doesn't leak PII, RTP header parsing)
 - **State machine models**: Stateright for scheduler and health metrics
 
@@ -137,19 +132,14 @@ PhoneCheck works behind NAT without port forwarding:
 
 Both techniques are required for reliable audio behind NAT.
 
-## Audio Matching Details
+## Greeting Matching Details
 
-**Wav2Vec2 embeddings** are used instead of text matching because:
-- Transcription varies: "thanks for calling" vs "thank you for calling"
-- Embeddings capture phonetic and semantic features
-- Cosine similarity handles minor audio variations
+The transcript and `EXPECTED_GREETING` are both normalized (lowercase, punctuation stripped, whitespace collapsed) and compared as word sequences with token-level Levenshtein similarity (`src/greeting.rs`). Two alignments are scored and the better wins:
 
-**Duration sensitivity:** Mean-pooled embeddings vary with audio duration:
-- 1 second capture vs 5 second reference: ~0.79 similarity
-- 2 second capture vs 5 second reference: ~0.91 similarity
-- Full capture vs reference: ~0.99 similarity
+1. **Expected-inside-transcript** (fuzzy substring): handles captures longer than the expected text.
+2. **Truncated capture** (fuzzy prefix): the transcript may match a leading prefix of the expected text, but only prefixes covering at least half the expected tokens count — a two-word capture never passes.
 
-The hardcoded 0.75 threshold accommodates these variations while rejecting truly different content (~0.02 similarity).
+At the default 0.75 threshold, 1-2 misheard/dropped words in an 11-word greeting pass (0.82-0.91); wrong greetings and intercept messages score <0.4. Alerts include expected text, heard transcript, and score.
 
 ## Health Check Server
 
@@ -167,7 +157,7 @@ PhoneCheck handles shutdown signals (SIGINT, SIGTERM) gracefully:
 - Active SIP calls receive BYE to end cleanly (10 second timeout)
 - Health server shuts down on cancellation
 - RTP receiver supports cancellation mid-stream
-- In-progress embeddings/transcription complete before exit
+- In-progress transcription completes before exit
 
 ## SIP Authentication
 

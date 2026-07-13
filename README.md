@@ -1,6 +1,6 @@
 # PhoneCheck
 
-A PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, captures the audio greeting, and uses Wav2Vec2 audio embeddings for semantic matching. Sends push notifications via Pushover if the expected greeting is not detected.
+A PBX health monitoring tool that periodically calls a phone number via SIP/VoIP, captures the audio greeting, transcribes it with Apple's SpeechAnalyzer, and fuzzy-matches the transcript against the expected greeting text. Sends push notifications via Pushover if the expected greeting is not detected.
 
 ## Voice AI Building Blocks
 
@@ -11,18 +11,18 @@ This project implements many core components needed for voice AI phone applicati
 - **G.711 Codec** - μ-law/A-law decoding with ITU-T compliant lookup tables
 - **Audio Resampling** - FFT-based 8kHz → 16kHz conversion using Rubato
 - **NAT Traversal** - STUN discovery + RTP hole punching for reliable audio behind NAT
-- **Audio Embeddings** - Wav2Vec2 via ONNX Runtime (statically linked) for semantic matching
-- **Speech Recognition** - Apple SpeechAnalyzer (macOS 26 Speech framework) for transcription logging, via a small Swift helper subprocess — no bundled model
+- **Speech Recognition** - Apple SpeechAnalyzer (macOS 26 Speech framework) via a small Swift helper subprocess — no bundled model
+- **Greeting Matching** - normalized token-level similarity between transcript and expected text (no ML models, no external deps)
 - **Formal Verification** - Kani proofs and Stateright models for correctness
 
 ## Architecture
 
 PhoneCheck is built as a modular system with clearly separated concerns:
 
-- **Orchestrator**: Manages the lifecycle of a check (INVITE, RTP capture, ML processing, Alerting).
+- **Orchestrator**: Manages the lifecycle of a check (INVITE, RTP capture, transcription, matching, alerting).
 - **SIP Stack**: Custom implementation of RFC 3261/2617 handling registration-less outbound calls.
 - **RTP Engine**: Receives G.711 packets, manages a jitter buffer for reordering, and handles NAT hole punching.
-- **ML Pipeline**: Decodes audio, resamples to 16kHz, transcribes via Apple's SpeechAnalyzer (for logs), and computes Wav2Vec2 embeddings for comparison.
+- **Speech Pipeline**: Decodes audio, resamples to 16kHz, transcribes via Apple's SpeechAnalyzer, and scores the transcript against `EXPECTED_GREETING` with token-level similarity.
 - **Scheduler**: A business-hours-aware loop (8am-5pm Pacific) that manages check timing and graceful shutdown.
 - **Health Server**: An embedded HTTP server providing monitoring endpoints for Kubernetes or external probes.
 
@@ -31,24 +31,24 @@ PhoneCheck is built as a modular system with clearly separated concerns:
 Monitor your business phone system to ensure callers hear the correct greeting. PhoneCheck will:
 
 1. Call your phone number every hour during business hours (8am-5pm Pacific)
-2. Capture the audio and compute a semantic embedding using Wav2Vec2
-3. Compare against a reference embedding using cosine similarity
-4. Send you a push notification if the greeting doesn't match or the call fails
+2. Capture the audio and transcribe it with Apple's SpeechAnalyzer
+3. Compare the transcript against your expected greeting text (fuzzy, word-level)
+4. Send you a push notification — including expected vs. heard text — if the greeting doesn't match or the call fails
 
-## Why Audio Embeddings?
+## How Matching Works
 
-Traditional text-based matching fails when:
-- The transcriber hears "thanks for calling" but you expected "thank you for calling"
-- Minor audio variations cause different transcriptions (e.g., background noise)
+Both the transcript and `EXPECTED_GREETING` are normalized (lowercased, punctuation stripped, whitespace collapsed) and compared as word sequences using token-level Levenshtein similarity, so one misheard word costs one edit regardless of length. Two alignments are scored and the better one wins:
 
-**Wav2Vec2 embeddings solve this** by comparing audio semantically. Similar-sounding phrases produce similar embeddings, allowing for natural variation while detecting significant changes or failures.
+- **Expected-inside-transcript**: the full expected text found anywhere in the transcript (handles captures longer than the expected text).
+- **Truncated capture**: the transcript matches a leading prefix of the expected text, as long as it covers at least half of it (so hearing just "thank you" never passes).
+
+This tolerates typical ASR jitter on 8 kHz G.711 telephone audio ("parties" for "party's", a dropped word) while rejecting wrong greetings, carrier intercept messages, and dead air. Every alert includes the expected text, the heard transcript, and the score, so misfires are easy to diagnose.
 
 ## Requirements
 
 - macOS 26+ (transcription uses the Speech framework's SpeechAnalyzer engine)
 - Rust 1.88+
 - Xcode command line tools (`swiftc`, for the transcription helper)
-- Python 3.11-3.13 with `uv` (one-time setup for exporting Wav2Vec2 model)
 - A [voip.ms](https://voip.ms) account with a SIP sub-account
 - A [Pushover](https://pushover.net) account for notifications
 
@@ -59,14 +59,11 @@ Traditional text-based matching fails when:
 git clone https://github.com/yourusername/phonecheck.git
 cd phonecheck
 
-# Build (also compiles the SpeechAnalyzer helper via swiftc; ONNX Runtime is downloaded automatically)
+# Build (also compiles the SpeechAnalyzer helper via swiftc)
 cargo build --release
-
-# Export Wav2Vec2 to ONNX (downloads ~380MB model)
-uv run scripts/export_wav2vec2.py
 ```
 
-The resulting binary is self-contained (~27MB) as ONNX Runtime is statically linked.
+The resulting binary is self-contained — no ML models to download or bundle.
 Transcription needs no bundled model: the en-US speech model is an OS-managed
 system asset (installed once by macOS on first use via AssetInventory).
 
@@ -89,7 +86,8 @@ Copy `.env.example` to `.env` and configure:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `EXPECTED_PHRASE` | Phrase for logging/transcription check | `thank you for calling` |
+| `EXPECTED_GREETING` | Expected greeting text (word-level fuzzy match) | `thank you for calling cubic machinery` |
+| `GREETING_MATCH_THRESHOLD` | Similarity threshold in (0.0, 1.0] | `0.75` |
 | `SIP_PORT` | SIP server port | `5060` |
 | `LISTEN_DURATION_SECS` | How long to listen (max 300) | `10` |
 | `MIN_AUDIO_DURATION_MS`| Min audio needed to avoid silence alerts | `500` |
@@ -139,27 +137,20 @@ If `HEALTH_PORT` is set, an HTTP server exposes:
 - `GET /ready`: Returns 200 if the last check succeeded, 503 if it failed.
 - `GET /metrics`: Prometheus-compatible metrics for integration with Grafana.
 
-## Audio Matching
+## Tuning the Match
 
-### Reference Capture
-On the first successful run, PhoneCheck saves the audio embedding as a baseline in `models/reference_embedding.bin`. Subsequent runs compare against this baseline.
+At the default threshold of **0.75**:
+- A clean transcript of the right greeting scores **1.0**.
+- Typical ASR jitter (one or two misheard/dropped words in eleven) scores **0.82-0.91**.
+- A capture covering only half the expected text still passes if the words are right.
+- Wrong greetings and carrier intercept ("not in service") messages score **<0.4**.
 
-### Similarity Threshold
-The cosine similarity threshold is hardcoded at **0.75**. 
-- Same greeting typically yields **>0.95**.
-- Slight variations (duration/noise) yield **0.80-0.90**.
-- Different greetings or "number not in service" messages yield **<0.10**.
-
-To reset the baseline:
-```bash
-rm models/reference_embedding.bin
-./target/release/phonecheck --once
-```
+If checks fail with a plausible transcript in the alert, extend or correct `EXPECTED_GREETING` to match what is actually heard within `LISTEN_DURATION_SECS`, rather than lowering the threshold.
 
 ## Troubleshooting
 
 - **No audio**: Ensure `STUN_SERVER` is configured if you are behind NAT.
-- **Low similarity**: If the greeting is cut off, increase `LISTEN_DURATION_SECS`.
+- **Low similarity**: The alert shows expected vs. heard text — if the greeting is cut off, increase `LISTEN_DURATION_SECS` or shorten `EXPECTED_GREETING`.
 - **Stale lock**: If the process crashed, manually remove `/tmp/phonecheck.lock`.
 
 ## License

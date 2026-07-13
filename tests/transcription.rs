@@ -7,7 +7,8 @@
 
 use std::path::Path;
 
-use phonecheck::speech::transcribe_with_helper;
+use phonecheck::greeting::greeting_similarity;
+use phonecheck::speech::{transcribe_with_helper, SpeechRecognizer};
 
 const HELPER_PATH: &str = "./native/speech_helper";
 const FIXTURE: &str = "test_audio.wav";
@@ -39,6 +40,40 @@ fn transcribes_test_audio_fixture() {
         lower.contains("thank you for calling cubic machinery"),
         "transcript should contain the greeting, got: {transcript:?}"
     );
+}
+
+/// Full check path on real audio: transcribe the fixture, then score the
+/// transcript against the configured expected greeting. This is the
+/// calibration anchor for GREETING_MATCH_THRESHOLD (default 0.75) on real
+/// 8 kHz G.711-degraded audio.
+#[test]
+fn fixture_transcript_matches_expected_greeting() {
+    let samples = load_fixture();
+
+    // The greeting configured in .env (fixture-supported portion; the fixture
+    // audio is truncated mid-word after "party's")
+    let expected = "Thank you for calling Cubic Machinery. If you know your party's";
+    // The shorter default from config.rs must also match
+    let expected_default = "thank you for calling cubic machinery";
+
+    let recognizer =
+        SpeechRecognizer::new(HELPER_PATH, expected, 0.75).expect("helper must exist");
+    let result = recognizer.check_audio(&samples).expect("check must succeed");
+
+    println!(
+        "calibration (real audio): similarity {:.3} for transcript {:?}",
+        result.similarity, result.transcript
+    );
+    assert!(
+        result.greeting_found,
+        "fixture must match expected greeting, similarity {:.3}, transcript {:?}",
+        result.similarity, result.transcript
+    );
+    assert!(result.similarity >= 0.85, "expect comfortable margin over 0.75");
+
+    let sim_default = greeting_similarity(expected_default, &result.transcript);
+    println!("calibration (real audio, default greeting): similarity {sim_default:.3}");
+    assert!(sim_default >= 0.95, "default greeting is a clean fuzzy substring");
 }
 
 #[test]

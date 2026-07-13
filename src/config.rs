@@ -24,7 +24,8 @@ pub enum ConfigKey {
     TargetPhone,
 
     // Detection settings
-    ExpectedPhrase,
+    ExpectedGreeting,
+    GreetingMatchThreshold,
     ListenDurationSecs,
 
     // Pushover notifications
@@ -53,7 +54,8 @@ impl ConfigKey {
             ConfigKey::SipServer => "SIP_SERVER",
             ConfigKey::SipPort => "SIP_PORT",
             ConfigKey::TargetPhone => "TARGET_PHONE",
-            ConfigKey::ExpectedPhrase => "EXPECTED_PHRASE",
+            ConfigKey::ExpectedGreeting => "EXPECTED_GREETING",
+            ConfigKey::GreetingMatchThreshold => "GREETING_MATCH_THRESHOLD",
             ConfigKey::ListenDurationSecs => "LISTEN_DURATION_SECS",
             ConfigKey::PushoverUserKey => "PUSHOVER_USER_KEY",
             ConfigKey::PushoverApiToken => "PUSHOVER_API_TOKEN",
@@ -81,7 +83,8 @@ impl ConfigKey {
     pub fn default_value(&self) -> Option<&'static str> {
         match self {
             ConfigKey::SipPort => Some("5060"),
-            ConfigKey::ExpectedPhrase => Some("thank you for calling cubic machinery"),
+            ConfigKey::ExpectedGreeting => Some("thank you for calling cubic machinery"),
+            ConfigKey::GreetingMatchThreshold => Some("0.75"),
             ConfigKey::ListenDurationSecs => Some("10"),
             ConfigKey::SpeechHelperPath => Some("./native/speech_helper"),
             ConfigKey::MinAudioDurationMs => Some("500"),
@@ -105,7 +108,9 @@ pub struct Config {
     pub target_phone: String,
 
     // Detection settings
-    pub expected_phrase: String,
+    pub expected_greeting: String,
+    /// Transcript similarity threshold in (0.0, 1.0] — see greeting.rs
+    pub greeting_match_threshold: f32,
     pub listen_duration_secs: u64,
 
     // Pushover notifications
@@ -152,14 +157,24 @@ impl Config {
 
             target_phone: get(ConfigKey::TargetPhone).context(ConfigKey::TargetPhone.env_var())?,
 
-            expected_phrase: get(ConfigKey::ExpectedPhrase)
+            expected_greeting: get(ConfigKey::ExpectedGreeting).unwrap_or_else(|| {
+                ConfigKey::ExpectedGreeting
+                    .default_value()
+                    .unwrap()
+                    .to_string()
+            }),
+            greeting_match_threshold: get(ConfigKey::GreetingMatchThreshold)
                 .unwrap_or_else(|| {
-                    ConfigKey::ExpectedPhrase
+                    ConfigKey::GreetingMatchThreshold
                         .default_value()
                         .unwrap()
                         .to_string()
                 })
-                .to_lowercase(),
+                .parse()
+                .context(format!(
+                    "{} must be a number between 0 and 1",
+                    ConfigKey::GreetingMatchThreshold.env_var()
+                ))?,
             listen_duration_secs: get(ConfigKey::ListenDurationSecs)
                 .unwrap_or_else(|| {
                     ConfigKey::ListenDurationSecs
@@ -229,9 +244,17 @@ impl Config {
             ));
         }
 
-        // Validate expected phrase is not empty
-        if self.expected_phrase.trim().is_empty() {
-            errors.push("EXPECTED_PHRASE cannot be empty.".to_string());
+        // Validate expected greeting is not empty
+        if self.expected_greeting.trim().is_empty() {
+            errors.push("EXPECTED_GREETING cannot be empty.".to_string());
+        }
+
+        // Validate match threshold is a sane similarity value
+        if !(self.greeting_match_threshold > 0.0 && self.greeting_match_threshold <= 1.0) {
+            errors.push(format!(
+                "GREETING_MATCH_THRESHOLD={} invalid. Expected a value in (0.0, 1.0].",
+                self.greeting_match_threshold
+            ));
         }
 
         // Validate listen duration is reasonable
@@ -366,11 +389,57 @@ mod tests {
     }
 
     #[test]
-    fn test_expected_phrase_lowercased() {
+    fn test_expected_greeting_preserved_verbatim() {
         let mut env = minimal_valid_env();
-        env.insert("EXPECTED_PHRASE", "Hello WORLD");
+        env.insert("EXPECTED_GREETING", "Hello WORLD, thanks!");
         let config = Config::from_map(&env).expect("should parse");
-        assert_eq!(config.expected_phrase, "hello world");
+        // Case/punctuation normalization happens in the matcher, not here
+        assert_eq!(config.expected_greeting, "Hello WORLD, thanks!");
+    }
+
+    #[test]
+    fn test_greeting_match_threshold_default() {
+        let env = minimal_valid_env();
+        let config = Config::from_map(&env).expect("should parse");
+        assert_eq!(config.greeting_match_threshold, 0.75);
+    }
+
+    #[test]
+    fn test_greeting_match_threshold_custom() {
+        let mut env = minimal_valid_env();
+        env.insert("GREETING_MATCH_THRESHOLD", "0.6");
+        let config = Config::from_map(&env).expect("should parse");
+        assert_eq!(config.greeting_match_threshold, 0.6);
+    }
+
+    #[test]
+    fn test_greeting_match_threshold_not_numeric_is_error() {
+        let mut env = minimal_valid_env();
+        env.insert("GREETING_MATCH_THRESHOLD", "high");
+        let result = Config::from_map(&env);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("GREETING_MATCH_THRESHOLD"),
+            "error should mention GREETING_MATCH_THRESHOLD: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_greeting_match_threshold_out_of_range_fails_validation() {
+        for bad in ["0", "-0.5", "1.5"] {
+            let mut env = minimal_valid_env();
+            env.insert("GREETING_MATCH_THRESHOLD", bad);
+            let config = Config::from_map(&env).expect("should parse");
+            let err = config.validate().expect_err("must fail validation");
+            assert!(
+                err.to_string().contains("GREETING_MATCH_THRESHOLD"),
+                "error should mention threshold for {}: {}",
+                bad,
+                err
+            );
+        }
     }
 
     #[test]
@@ -433,16 +502,16 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_empty_expected_phrase() {
+    fn test_validation_empty_expected_greeting() {
         let mut env = minimal_valid_env();
-        env.insert("EXPECTED_PHRASE", "   ");
+        env.insert("EXPECTED_GREETING", "   ");
         let config = Config::from_map(&env).expect("should parse");
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("EXPECTED_PHRASE"),
-            "error should mention empty phrase: {}",
+            err.contains("EXPECTED_GREETING"),
+            "error should mention empty greeting: {}",
             err
         );
     }
@@ -502,7 +571,8 @@ mod tests {
             SipServer,
             SipPort,
             TargetPhone,
-            ExpectedPhrase,
+            ExpectedGreeting,
+            GreetingMatchThreshold,
             ListenDurationSecs,
             PushoverUserKey,
             PushoverApiToken,
@@ -527,7 +597,8 @@ mod tests {
         assert!(PushoverApiToken.is_required());
 
         assert!(!SipPort.is_required()); // has default
-        assert!(!ExpectedPhrase.is_required()); // has default
+        assert!(!ExpectedGreeting.is_required()); // has default
+        assert!(!GreetingMatchThreshold.is_required()); // has default
         assert!(!StunServer.is_required()); // optional
     }
 
@@ -537,9 +608,10 @@ mod tests {
         use ConfigKey::*;
         assert_eq!(SipPort.default_value(), Some("5060"));
         assert_eq!(
-            ExpectedPhrase.default_value(),
+            ExpectedGreeting.default_value(),
             Some("thank you for calling cubic machinery")
         );
+        assert_eq!(GreetingMatchThreshold.default_value(), Some("0.75"));
         assert_eq!(ListenDurationSecs.default_value(), Some("10"));
         assert_eq!(
             SpeechHelperPath.default_value(),
@@ -566,20 +638,20 @@ mod proptests {
             "[a-z]+\\.[a-z]{2,4}", // sip_server
             1u16..=65535u16,       // sip_port
             "[0-9]{10}",           // target_phone
-            "[a-z ]{5,30}",        // expected_phrase
+            "[a-z ]{5,30}",        // expected_greeting
             1u64..=300u64,         // listen_duration
             "[a-z0-9]{20,30}",     // pushover_user_key
             "[a-z0-9]{20,30}",     // pushover_api_token
         )
             .prop_map(
-                |(user, pass, server, port, phone, phrase, duration, po_user, po_token)| {
+                |(user, pass, server, port, phone, greeting, duration, po_user, po_token)| {
                     let mut m = HashMap::new();
                     m.insert("SIP_USERNAME", user);
                     m.insert("SIP_PASSWORD", pass);
                     m.insert("SIP_SERVER", server);
                     m.insert("SIP_PORT", port.to_string());
                     m.insert("TARGET_PHONE", phone);
-                    m.insert("EXPECTED_PHRASE", phrase);
+                    m.insert("EXPECTED_GREETING", greeting);
                     m.insert("LISTEN_DURATION_SECS", duration.to_string());
                     m.insert("PUSHOVER_USER_KEY", po_user);
                     m.insert("PUSHOVER_API_TOKEN", po_token);
@@ -614,18 +686,34 @@ mod proptests {
         }
 
         #[test]
-        fn expected_phrase_always_lowercased(phrase in "[A-Za-z ]{1,50}") {
+        fn expected_greeting_preserved_verbatim(greeting in "[A-Za-z ]{1,50}") {
             let mut env: HashMap<&str, String> = HashMap::new();
             env.insert("SIP_USERNAME", "user".to_string());
             env.insert("SIP_PASSWORD", "pass".to_string());
             env.insert("SIP_SERVER", "server.com".to_string());
             env.insert("TARGET_PHONE", "1234567890".to_string());
-            env.insert("EXPECTED_PHRASE", phrase.clone());
+            env.insert("EXPECTED_GREETING", greeting.clone());
             env.insert("PUSHOVER_USER_KEY", "userkey123".to_string());
             env.insert("PUSHOVER_API_TOKEN", "token456".to_string());
 
             let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
-            prop_assert_eq!(config.expected_phrase, phrase.to_lowercase());
+            // Normalization (lowercase, punctuation) is the matcher's job
+            prop_assert_eq!(config.expected_greeting, greeting);
+        }
+
+        #[test]
+        fn threshold_parsing_never_panics(threshold_str in ".*") {
+            let mut env: HashMap<&str, String> = HashMap::new();
+            env.insert("SIP_USERNAME", "user".to_string());
+            env.insert("SIP_PASSWORD", "pass".to_string());
+            env.insert("SIP_SERVER", "server.com".to_string());
+            env.insert("TARGET_PHONE", "1234567890".to_string());
+            env.insert("GREETING_MATCH_THRESHOLD", threshold_str);
+            env.insert("PUSHOVER_USER_KEY", "userkey123".to_string());
+            env.insert("PUSHOVER_API_TOKEN", "token456".to_string());
+
+            // Must return Ok or Err, never panic
+            let _ = Config::from_getter(|key| env.get(key.env_var()).cloned());
         }
     }
 }

@@ -59,7 +59,11 @@ async fn main() -> Result<()> {
         redact::phone_number(&config.target_phone)
     );
     info!("  SIP server: {}:{}", config.sip_server, config.sip_port);
-    info!("  Expected phrase: \"{}\"", config.expected_phrase);
+    info!("  Expected greeting: \"{}\"", config.expected_greeting);
+    info!(
+        "  Match threshold: {:.2}",
+        config.greeting_match_threshold
+    );
     info!("  Listen duration: {}s", config.listen_duration_secs);
 
     // Handle --validate mode
@@ -80,10 +84,12 @@ async fn main() -> Result<()> {
     // Wrap config in Arc for sharing (do this early)
     let config = Arc::new(config);
 
-    // Initialize speech recognizer (Mutex for interior mutability - embedding model needs &mut)
-    let recognizer = Arc::new(std::sync::Mutex::new(SpeechRecognizer::new(
+    // Initialize speech recognizer (transcription helper + transcript matcher)
+    let recognizer = Arc::new(SpeechRecognizer::new(
         &config.speech_helper_path,
-    )?));
+        &config.expected_greeting,
+        config.greeting_match_threshold,
+    )?);
 
     // Initialize notifier
     let notifier = Arc::new(Notifier::new(&config));

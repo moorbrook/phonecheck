@@ -22,7 +22,7 @@
 //! - from_getter never panics on any input
 //! - is_valid_phone_number never panics
 //! - validate() never panics (may return Err)
-//! - expected_phrase is always lowercase
+//! - expected_greeting is preserved verbatim (matcher normalizes)
 //! - Required fields missing returns Err
 //! - Port parsing with invalid string uses default or returns Err
 
@@ -203,8 +203,9 @@ proptest! {
         server in ".*",
         port in ".*",
         phone in ".*",
-        phrase in ".*",
+        greeting in ".*",
         duration in ".*",
+        threshold in ".*",
     ) {
         let mut env: HashMap<&str, String> = HashMap::new();
         env.insert("SIP_USERNAME", username);
@@ -212,8 +213,9 @@ proptest! {
         env.insert("SIP_SERVER", server);
         env.insert("SIP_PORT", port);
         env.insert("TARGET_PHONE", phone);
-        env.insert("EXPECTED_PHRASE", phrase);
+        env.insert("EXPECTED_GREETING", greeting);
         env.insert("LISTEN_DURATION_SECS", duration);
+        env.insert("GREETING_MATCH_THRESHOLD", threshold);
         env.insert("PUSHOVER_USER_KEY", "uQiRzpo4DXghDmr9QzzfQu27cmVRsG".to_string());
         env.insert("PUSHOVER_API_TOKEN", "azGDORePK8gMaC0QOYAMyEEuzJnyUi".to_string());
 
@@ -222,17 +224,18 @@ proptest! {
 }
 
 // ============================================================================
-// INVARIANT: expected_phrase IS ALWAYS LOWERCASE
+// INVARIANT: expected_greeting IS PRESERVED VERBATIM
+// (normalization — lowercase, punctuation stripping — is the matcher's job)
 // ============================================================================
 
 proptest! {
     #[test]
-    fn prop_expected_phrase_always_lowercase(phrase in "[A-Za-z0-9 ]{0,100}") {
+    fn prop_expected_greeting_preserved_verbatim(greeting in "[A-Za-z0-9 ]{0,100}") {
         let mut env = base_valid_config();
-        env.insert("EXPECTED_PHRASE", phrase.clone());
+        env.insert("EXPECTED_GREETING", greeting.clone());
 
         let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
-        prop_assert_eq!(config.expected_phrase, phrase.to_lowercase());
+        prop_assert_eq!(config.expected_greeting, greeting);
     }
 }
 
@@ -403,9 +406,9 @@ fn test_very_long_username() {
 }
 
 #[test]
-fn test_very_long_phrase() {
+fn test_very_long_greeting() {
     let mut env = base_valid_config();
-    env.insert("EXPECTED_PHRASE", "word ".repeat(10000));
+    env.insert("EXPECTED_GREETING", "word ".repeat(10000));
     let config = Config::from_getter(|key| env.get(key.env_var()).cloned());
     assert!(config.is_ok());
 }
@@ -541,6 +544,6 @@ fn test_config_parsing_deterministic() {
 
     assert_eq!(config1.sip_username, config2.sip_username);
     assert_eq!(config1.sip_port, config2.sip_port);
-    assert_eq!(config1.expected_phrase, config2.expected_phrase);
+    assert_eq!(config1.expected_greeting, config2.expected_greeting);
     assert_eq!(config1.listen_duration_secs, config2.listen_duration_secs);
 }

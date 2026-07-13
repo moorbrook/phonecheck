@@ -10,11 +10,6 @@
 .env.*
 !.env.example
 
-# Whisper models (large binary files)
-/models/
-*.bin
-*.ggml
-
 # IDE and editor
 .idea/
 .vscode/
@@ -36,7 +31,6 @@ proptest-regressions/
 coverage/
 lcov.info
 mutants.out*/
-models/
 *.proptest-regressions
 
 # Runtime logs and local build output
