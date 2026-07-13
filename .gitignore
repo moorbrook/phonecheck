@@ -38,3 +38,7 @@ lcov.info
 mutants.out*/
 models/
 *.proptest-regressions
+
+# Runtime logs and local build output
+*.log
+/bin/
