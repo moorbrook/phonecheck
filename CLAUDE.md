@@ -8,8 +8,13 @@ PhoneCheck is a PBX health monitoring tool that periodically calls a phone numbe
 
 ## Build Commands
 
+Requires macOS 26+ and the Xcode command line tools (`swiftc`) — transcription
+uses Apple's SpeechAnalyzer (Speech framework) via a Swift helper subprocess
+(`native/speech_helper.swift`), compiled automatically by `build.rs`
+(or manually: `sh scripts/build_speech_helper.sh`).
+
 ```bash
-# Build (requires cmake for whisper.cpp; ONNX Runtime is statically linked)
+# Build (compiles the SpeechAnalyzer helper via swiftc; ONNX Runtime is statically linked)
 cargo build --release
 
 # Run tests
@@ -57,7 +62,7 @@ src/
 3. **NAT Traversal** → STUN discovery + RTP hole punching for audio behind NAT
 4. **Decode** → PCM i16 → jitter buffer reordering
 5. **Resample** → 8kHz → 16kHz f32 (Rubato FFT-based)
-6. **Whisper** → transcribe for logging/debugging
+6. **SpeechAnalyzer** → transcribe for logging/debugging (helper subprocess: WAV in → JSON transcript out)
 7. **Wav2Vec2** → compute 768-dimensional embedding (mean pooled, L2 normalized)
 8. **Match** → cosine similarity vs reference embedding (threshold: 0.75)
 9. **Alert** → Pushover push notification if similarity < 0.75
@@ -70,7 +75,7 @@ Copy `.env.example` to `.env` and configure:
 - **SIP credentials**: voip.ms sub-account (SIP_USERNAME, SIP_PASSWORD, SIP_SERVER)
 - **Target phone**: TARGET_PHONE (10 digits for voip.ms)
 - **Pushover**: PUSHOVER_USER_KEY, PUSHOVER_API_TOKEN
-- **Models**: WHISPER_MODEL_PATH (ggml-base.en.bin from HuggingFace)
+- **Speech helper**: SPEECH_HELPER_PATH (default `./native/speech_helper`, built by `cargo build`)
 
 ### Optional
 - **Audio settings**: LISTEN_DURATION_SECS (default: 10), MIN_AUDIO_DURATION_MS (default: 500)
@@ -85,7 +90,7 @@ Copy `.env.example` to `.env` and configure:
 
 ## Dependencies
 
-- **whisper-rs**: Requires `cmake` to build whisper.cpp
+- **Speech framework (macOS 26+)**: SpeechAnalyzer/SpeechTranscriber for transcription; the en-US model is an OS-managed system asset (AssetInventory) — nothing is bundled or downloaded by the app
 - **ort (ONNX Runtime)**: Statically linked (~50MB), no runtime dependency
 - **Rubato**: FFT-based audio resampling
 - G.711 lookup tables sourced from [zaf/g711](https://github.com/zaf/g711)
@@ -135,7 +140,7 @@ Both techniques are required for reliable audio behind NAT.
 ## Audio Matching Details
 
 **Wav2Vec2 embeddings** are used instead of text matching because:
-- Whisper transcription varies: "thanks for calling" vs "thank you for calling"
+- Transcription varies: "thanks for calling" vs "thank you for calling"
 - Embeddings capture phonetic and semantic features
 - Cosine similarity handles minor audio variations
 

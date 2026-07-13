@@ -42,3 +42,6 @@ models/
 # Runtime logs and local build output
 *.log
 /bin/
+
+# Compiled SpeechAnalyzer helper (built from native/speech_helper.swift)
+/native/speech_helper

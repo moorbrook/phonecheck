@@ -7,8 +7,9 @@ edition = "2021"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# Speech recognition (whisper.cpp bindings - requires cmake)
-whisper-rs = "0.15"
+# Transcription uses Apple's SpeechAnalyzer (macOS 26 Speech framework) via a
+# Swift helper subprocess (native/speech_helper, compiled by build.rs) —
+# no in-process speech model or cmake dependency.
 
 # HTTP client for Pushover API
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

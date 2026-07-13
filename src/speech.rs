@@ -1,10 +1,19 @@
 /// Speech recognition and audio matching
 ///
-/// Uses Whisper for transcription (logging/debugging) and Wav2Vec2 embeddings
-/// for semantic audio similarity matching.
+/// Uses Apple's SpeechAnalyzer/SpeechTranscriber (macOS 26 Speech framework)
+/// for transcription (logging/debugging) via a small helper subprocess
+/// (`native/speech_helper`), and Wav2Vec2 embeddings for semantic audio
+/// similarity matching.
 ///
-/// Both Whisper and Wav2Vec2 models are loaded via the singleton ModelManager
-/// to ensure they are only loaded once per process and properly cleaned up.
+/// The Wav2Vec2 model is loaded via the singleton ModelManager to ensure it is
+/// only loaded once per process and properly cleaned up. Transcription happens
+/// out-of-process: the helper takes a WAV path and prints a JSON transcript,
+/// keeping the Rust binary free of Swift FFI linkage.
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
@@ -14,60 +23,187 @@ use crate::model_manager::{ModelManager, REFERENCE_EMBEDDING_PATH};
 /// Default similarity threshold for embedding-based matching
 const SIMILARITY_THRESHOLD: f32 = DEFAULT_SIMILARITY_THRESHOLD;
 
+/// Sample rate of the audio handed to the transcription helper (Hz)
+const HELPER_SAMPLE_RATE: u32 = crate::rtp::TARGET_SAMPLE_RATE;
+
+/// Maximum time the transcription helper may run before being killed
+const HELPER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Poll interval while waiting for the helper to exit
+const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Type alias for the singleton mutex type
 type ModelManagerMutex = &'static std::sync::Mutex<Option<ModelManager>>;
 
+/// Temp file that removes itself on drop (even on error paths)
+struct TempWav(PathBuf);
+
+impl Drop for TempWav {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Write 16 kHz mono f32 samples to a temporary WAV file (i16 PCM)
+fn write_temp_wav(audio_samples: &[f32]) -> Result<TempWav> {
+    let path = std::env::temp_dir().join(format!(
+        "phonecheck_transcribe_{}_{:x}.wav",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: HELPER_SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let temp = TempWav(path.clone());
+    let mut writer = hound::WavWriter::create(&path, spec).context("Failed to create temp WAV")?;
+    for &sample in audio_samples {
+        let clamped = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
+        writer.write_sample(clamped)?;
+    }
+    writer.finalize().context("Failed to finalize temp WAV")?;
+    Ok(temp)
+}
+
+/// Transcribe 16 kHz mono f32 samples by invoking the SpeechAnalyzer helper.
+///
+/// The helper is a small Swift binary (built by `scripts/build_speech_helper.sh`)
+/// that reads a WAV file and prints `{"transcript": "..."}` on stdout. Errors
+/// (missing OS speech assets, unsupported OS, bad audio) arrive on stderr with
+/// a non-zero exit code and are propagated here.
+pub fn transcribe_with_helper(helper_path: &Path, audio_samples: &[f32]) -> Result<String> {
+    if !helper_path.exists() {
+        anyhow::bail!(
+            "Speech helper not found at '{}'. Build it with: sh scripts/build_speech_helper.sh \
+             (requires macOS 26+ and the Xcode command line tools)",
+            helper_path.display()
+        );
+    }
+
+    let temp_wav = write_temp_wav(audio_samples)?;
+
+    let mut child = Command::new(helper_path)
+        .arg(&temp_wav.0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to spawn speech helper '{}'", helper_path.display()))?;
+
+    // Bounded wait: poll with a hard iteration cap, then kill on timeout.
+    let max_polls = (HELPER_TIMEOUT.as_millis() / HELPER_POLL_INTERVAL.as_millis()).max(1);
+    let mut status = None;
+    for _ in 0..max_polls {
+        if let Some(s) = child.try_wait().context("Failed to wait on speech helper")? {
+            status = Some(s);
+            break;
+        }
+        std::thread::sleep(HELPER_POLL_INTERVAL);
+    }
+
+    let status = match status {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!(
+                "Speech helper timed out after {}s and was killed",
+                HELPER_TIMEOUT.as_secs()
+            );
+        }
+    };
+
+    // The helper's output is tiny (one JSON line), so reading after exit is safe.
+    let mut stdout = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut stdout);
+    }
+    let mut stderr = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut stderr);
+    }
+
+    if !status.success() {
+        anyhow::bail!(
+            "Speech helper failed (exit: {}): {}",
+            status.code().map_or("signal".into(), |c| c.to_string()),
+            stderr.trim()
+        );
+    }
+
+    if !stderr.trim().is_empty() {
+        info!("Speech helper: {}", stderr.trim());
+    }
+
+    parse_helper_output(&stdout)
+}
+
+/// Parse the helper's JSON output (`{"transcript": "..."}`)
+fn parse_helper_output(stdout: &str) -> Result<String> {
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())
+        .with_context(|| format!("Speech helper produced invalid JSON: {:?}", stdout.trim()))?;
+    let transcript = value
+        .get("transcript")
+        .and_then(|t| t.as_str())
+        .context("Speech helper JSON missing 'transcript' field")?;
+    Ok(transcript.trim().to_string())
+}
+
 pub struct SpeechRecognizer {
-    /// Model path (stored for singleton access)
-    model_path: String,
+    /// Path to the SpeechAnalyzer helper binary
+    helper_path: PathBuf,
     /// Pre-computed reference embedding for expected phrase audio
     reference_embedding: Option<Vec<f32>>,
 }
 
 impl SpeechRecognizer {
-    pub fn new(model_path: &str) -> Result<Self> {
-        info!("Initializing SpeechRecognizer (using singleton models)");
+    pub fn new(helper_path: &str) -> Result<Self> {
+        info!("Initializing SpeechRecognizer (SpeechAnalyzer helper + Wav2Vec2 singleton)");
 
-        // Initialize singleton model manager
-        // This loads Whisper and Wav2Vec2 models on first call
-        if ModelManager::get(model_path).is_none() {
+        let helper_path = PathBuf::from(helper_path);
+        if !helper_path.exists() {
+            anyhow::bail!(
+                "Speech helper not found at '{}'. Build it with: sh scripts/build_speech_helper.sh \
+                 (requires macOS 26+ and the Xcode command line tools)",
+                helper_path.display()
+            );
+        }
+
+        // Initialize singleton model manager (loads Wav2Vec2 on first call)
+        if ModelManager::get().is_none() {
             anyhow::bail!("Failed to initialize ModelManager - check model files");
         }
 
         // Load cached reference embedding if available
-        let reference_embedding = Self::load_cached_reference(model_path);
+        let reference_embedding = Self::load_cached_reference();
 
         if reference_embedding.is_some() {
             info!("Using cached reference embedding for phrase matching");
         }
 
         Ok(Self {
-            model_path: model_path.to_string(),
+            helper_path,
             reference_embedding,
         })
     }
 
     /// Load cached reference embedding from disk
-    fn load_cached_reference(model_path: &str) -> Option<Vec<f32>> {
+    fn load_cached_reference() -> Option<Vec<f32>> {
         // Access singleton only for loading the reference (no models needed)
-        ModelManager::get(model_path)?;
+        ModelManager::get()?;
         ModelManager::load_reference_embedding()
     }
 
-    /// Transcribe audio using Whisper (immutable access)
+    /// Transcribe audio using the SpeechAnalyzer helper subprocess
     fn transcribe_audio(&self, audio_samples: &[f32]) -> Result<String> {
-        let guard = ModelManager::get(&self.model_path)
-            .and_then(|m: ModelManagerMutex| m.lock().ok())
-            .context("Failed to access ModelManager")?;
-
-        let model_manager = guard.as_ref().context("ModelManager not initialized")?;
-
-        model_manager.transcribe(audio_samples)
+        transcribe_with_helper(&self.helper_path, audio_samples)
     }
 
     /// Check if embedder is available
     fn has_embedder(&self) -> Result<bool> {
-        let guard = ModelManager::get(&self.model_path)
+        let guard = ModelManager::get()
             .and_then(|m: ModelManagerMutex| m.lock().ok())
             .context("Failed to access ModelManager")?;
 
@@ -78,7 +214,7 @@ impl SpeechRecognizer {
 
     /// Compute embedding using Wav2Vec2 (mutable access)
     fn compute_embedding(&mut self, audio_samples: &[f32]) -> Result<Vec<f32>> {
-        let mut guard = ModelManager::get(&self.model_path)
+        let mut guard = ModelManager::get()
             .and_then(|m: ModelManagerMutex| m.lock().ok())
             .context("Failed to access ModelManager for embedding")?;
 
@@ -98,7 +234,7 @@ impl SpeechRecognizer {
             });
         }
 
-        // First, transcribe with Whisper for logging/debugging
+        // First, transcribe with SpeechAnalyzer for logging/debugging
         let transcript = self.transcribe_audio(audio_samples)?;
         debug!("Transcribed: {}", transcript);
 
@@ -193,5 +329,35 @@ mod tests {
         };
         assert!(result.phrase_found);
         assert_eq!(result.similarity, Some(0.95));
+    }
+
+    #[test]
+    fn test_helper_missing_is_clear_error() {
+        let err = transcribe_with_helper(Path::new("/nonexistent/speech_helper"), &[0.0; 160])
+            .expect_err("missing helper must error");
+        let msg = err.to_string();
+        assert!(msg.contains("Speech helper not found"), "got: {msg}");
+        assert!(msg.contains("build_speech_helper.sh"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_recognizer_new_missing_helper_is_clear_error() {
+        let err = match SpeechRecognizer::new("/nonexistent/speech_helper") {
+            Ok(_) => panic!("missing helper must error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("Speech helper not found"));
+    }
+
+    #[test]
+    fn test_parse_helper_output_valid() {
+        let t = parse_helper_output("{\"transcript\": \"hello world\"}\n").unwrap();
+        assert_eq!(t, "hello world");
+    }
+
+    #[test]
+    fn test_parse_helper_output_invalid_json() {
+        assert!(parse_helper_output("not json").is_err());
+        assert!(parse_helper_output("{\"other\": 1}").is_err());
     }
 }

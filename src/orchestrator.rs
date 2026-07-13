@@ -45,7 +45,7 @@ pub async fn run_check(
         save_audio(&call_result.audio_samples, path);
     }
 
-    // Whisper transcription + ONNX embedding are CPU-bound and can take seconds.
+    // Transcription (helper subprocess) + ONNX embedding can take seconds.
     // Run them via block_in_place so the async runtime (health server, shutdown
     // signal handling) stays responsive instead of stalling a worker thread.
     let check_result = match run_cpu_bound(|| {

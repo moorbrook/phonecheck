@@ -12,7 +12,7 @@ This project implements many core components needed for voice AI phone applicati
 - **Audio Resampling** - FFT-based 8kHz → 16kHz conversion using Rubato
 - **NAT Traversal** - STUN discovery + RTP hole punching for reliable audio behind NAT
 - **Audio Embeddings** - Wav2Vec2 via ONNX Runtime (statically linked) for semantic matching
-- **Speech Recognition** - Whisper integration for transcription logging
+- **Speech Recognition** - Apple SpeechAnalyzer (macOS 26 Speech framework) for transcription logging, via a small Swift helper subprocess — no bundled model
 - **Formal Verification** - Kani proofs and Stateright models for correctness
 
 ## Architecture
@@ -22,7 +22,7 @@ PhoneCheck is built as a modular system with clearly separated concerns:
 - **Orchestrator**: Manages the lifecycle of a check (INVITE, RTP capture, ML processing, Alerting).
 - **SIP Stack**: Custom implementation of RFC 3261/2617 handling registration-less outbound calls.
 - **RTP Engine**: Receives G.711 packets, manages a jitter buffer for reordering, and handles NAT hole punching.
-- **ML Pipeline**: Decodes audio, resamples to 16kHz, transcribes via Whisper (for logs), and computes Wav2Vec2 embeddings for comparison.
+- **ML Pipeline**: Decodes audio, resamples to 16kHz, transcribes via Apple's SpeechAnalyzer (for logs), and computes Wav2Vec2 embeddings for comparison.
 - **Scheduler**: A business-hours-aware loop (8am-5pm Pacific) that manages check timing and graceful shutdown.
 - **Health Server**: An embedded HTTP server providing monitoring endpoints for Kubernetes or external probes.
 
@@ -38,15 +38,16 @@ Monitor your business phone system to ensure callers hear the correct greeting. 
 ## Why Audio Embeddings?
 
 Traditional text-based matching fails when:
-- Whisper transcribes "thanks for calling" but you expected "thank you for calling"
+- The transcriber hears "thanks for calling" but you expected "thank you for calling"
 - Minor audio variations cause different transcriptions (e.g., background noise)
 
 **Wav2Vec2 embeddings solve this** by comparing audio semantically. Similar-sounding phrases produce similar embeddings, allowing for natural variation while detecting significant changes or failures.
 
 ## Requirements
 
+- macOS 26+ (transcription uses the Speech framework's SpeechAnalyzer engine)
 - Rust 1.88+
-- CMake (for building whisper.cpp)
+- Xcode command line tools (`swiftc`, for the transcription helper)
 - Python 3.11-3.13 with `uv` (one-time setup for exporting Wav2Vec2 model)
 - A [voip.ms](https://voip.ms) account with a SIP sub-account
 - A [Pushover](https://pushover.net) account for notifications
@@ -58,19 +59,16 @@ Traditional text-based matching fails when:
 git clone https://github.com/yourusername/phonecheck.git
 cd phonecheck
 
-# Build (requires cmake; ONNX Runtime is downloaded automatically)
+# Build (also compiles the SpeechAnalyzer helper via swiftc; ONNX Runtime is downloaded automatically)
 cargo build --release
-
-# Download Whisper model
-mkdir -p models
-curl -L -o models/ggml-base.en.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 
 # Export Wav2Vec2 to ONNX (downloads ~380MB model)
 uv run scripts/export_wav2vec2.py
 ```
 
 The resulting binary is self-contained (~27MB) as ONNX Runtime is statically linked.
+Transcription needs no bundled model: the en-US speech model is an OS-managed
+system asset (installed once by macOS on first use via AssetInventory).
 
 ## Configuration
 
@@ -97,7 +95,7 @@ Copy `.env.example` to `.env` and configure:
 | `MIN_AUDIO_DURATION_MS`| Min audio needed to avoid silence alerts | `500` |
 | `STUN_SERVER` | STUN server for NAT (e.g. `stun.l.google.com:19302`) | (disabled) |
 | `HEALTH_PORT` | HTTP health check port | (disabled) |
-| `WHISPER_MODEL_PATH` | Path to Whisper GGML model | `./models/ggml-base.en.bin` |
+| `SPEECH_HELPER_PATH` | Path to SpeechAnalyzer helper binary | `./native/speech_helper` |
 | `RUST_LOG` | Log level (error, warn, info, debug, trace) | `info` |
 
 ## Usage

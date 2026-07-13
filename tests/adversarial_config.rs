@@ -192,7 +192,7 @@ proptest! {
     #[test]
     fn prop_from_getter_never_panics_with_arbitrary_path(path in dangerous_path()) {
         let mut env = base_valid_config();
-        env.insert("WHISPER_MODEL_PATH", path);
+        env.insert("SPEECH_HELPER_PATH", path);
         let _ = Config::from_getter(|key| env.get(key.env_var()).cloned());
     }
 

@@ -1,26 +1,26 @@
-//! Singleton model manager for Whisper and Wav2Vec2 models
+//! Singleton model manager for the Wav2Vec2 embedding model
 //!
-//! Ensures models are loaded only once per process and cleaned up properly on drop.
+//! Ensures the model is loaded only once per process and cleaned up properly on drop.
 //! Uses once_cell for lazy initialization and thread-safe access.
+//!
+//! Transcription is handled separately by the SpeechAnalyzer helper subprocess
+//! (see `speech.rs`); no transcription model is loaded in-process.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::embedding::AudioEmbedder;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// Default path for the reference embedding cache
 pub const REFERENCE_EMBEDDING_PATH: &str = "./models/reference_embedding.bin";
 
 /// Singleton model manager
 ///
-/// Holds both Whisper and Wav2Vec2 models, loading them once per process.
+/// Holds the Wav2Vec2 embedder, loading it once per process.
 /// Implements Drop for proper cleanup logging.
 pub struct ModelManager {
-    whisper_ctx: WhisperContext,
     embedder: Option<AudioEmbedder>,
-    whisper_model_path: String,
 }
 
 /// Global singleton instance using once_cell for lazy initialization
@@ -30,14 +30,12 @@ static MODEL_MANAGER: once_cell::sync::OnceCell<Mutex<Option<ModelManager>>> =
 impl ModelManager {
     /// Get or create the singleton model manager
     ///
-    /// On first call, loads both Whisper and Wav2Vec2 models.
+    /// On first call, loads the Wav2Vec2 model.
     /// Subsequent calls return the already-loaded instance.
-    ///
-    /// Returns None if initialization fails (should only happen on first call).
-    pub fn get(whisper_model_path: &str) -> Option<&'static Mutex<Option<Self>>> {
+    pub fn get() -> Option<&'static Mutex<Option<Self>>> {
         // Initialize on first access
         if MODEL_MANAGER.get().is_none() {
-            let manager = Self::try_initialize(whisper_model_path);
+            let manager = Self::try_initialize();
             let _ = MODEL_MANAGER.set(Mutex::new(manager));
         }
 
@@ -46,18 +44,9 @@ impl ModelManager {
 
     /// Try to initialize the model manager
     ///
-    /// Loads Whisper model (required) and Wav2Vec2 embedder (optional).
-    /// Returns None if Whisper loading fails, Some with embedder=None if Wav2Vec2 fails.
-    fn try_initialize(whisper_model_path: &str) -> Option<Self> {
-        // Load Whisper model (required)
-        let whisper_ctx = match Self::load_whisper(whisper_model_path) {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                warn!("Failed to load Whisper model: {}", e);
-                return None;
-            }
-        };
-
+    /// Loads the Wav2Vec2 embedder (optional): returns Some with embedder=None
+    /// if loading fails, so transcription-only operation still works.
+    fn try_initialize() -> Option<Self> {
         // Try to load Wav2Vec2 embedder (optional)
         let embedder = match Self::load_embedder() {
             Ok(e) => {
@@ -70,79 +59,14 @@ impl ModelManager {
             }
         };
 
-        Some(Self {
-            whisper_ctx,
-            embedder,
-            whisper_model_path: whisper_model_path.to_string(),
-        })
-    }
-
-    /// Load Whisper model from disk
-    fn load_whisper(model_path: &str) -> Result<WhisperContext> {
-        info!("Loading Whisper model from: {}", model_path);
-
-        if !std::path::Path::new(model_path).exists() {
-            anyhow::bail!(
-                "Whisper model not found at '{}'. Download a GGML model from:\n\
-                 https://huggingface.co/ggerganov/whisper.cpp/tree/main\n\
-                 Recommended: ggml-base.en.bin for English (141 MB)",
-                model_path
-            );
-        }
-
-        let ctx = WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
-            .context(format!(
-                "Failed to load Whisper model from '{}'. Possible causes:\n\
-                 - Wrong model format (must be GGML .bin, not PyTorch .pt)\n\
-                 - Corrupted download (re-download the model)\n\
-                 - Insufficient memory (try a smaller model like ggml-tiny.en.bin)",
-                model_path
-            ))?;
-
-        info!("Whisper model loaded successfully");
-        Ok(ctx)
+        Some(Self { embedder })
     }
 
     /// Load Wav2Vec2 embedder from disk
     fn load_embedder() -> Result<AudioEmbedder> {
+        use anyhow::Context;
         AudioEmbedder::new("./models/wav2vec2_encoder.onnx")
             .context("Failed to load Wav2Vec2 embedder")
-    }
-
-    /// Transcribe audio using Whisper
-    pub fn transcribe(&self, audio_samples: &[f32]) -> Result<String> {
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-
-        params.set_n_threads(4);
-        params.set_language(Some("en"));
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_suppress_nst(true);
-
-        let mut state = self
-            .whisper_ctx
-            .create_state()
-            .context("Failed to create Whisper state")?;
-
-        state
-            .full(params, audio_samples)
-            .context("Failed to run transcription")?;
-
-        let num_segments = state.full_n_segments();
-        let mut full_text = String::new();
-
-        for i in 0..num_segments {
-            if let Some(segment) = state.get_segment(i) {
-                if let Ok(text) = segment.to_str() {
-                    full_text.push_str(text);
-                    full_text.push(' ');
-                }
-            }
-        }
-
-        Ok(full_text.trim().to_string())
     }
 
     /// Compute audio embedding using Wav2Vec2
@@ -213,10 +137,6 @@ impl Drop for ModelManager {
     fn drop(&mut self) {
         info!("Releasing ModelManager resources");
         debug!(
-            "Dropping WhisperContext (model: {})",
-            self.whisper_model_path
-        );
-        debug!(
             "Dropping AudioEmbedder: {}",
             if self.embedder.is_some() {
                 "loaded"
@@ -225,7 +145,7 @@ impl Drop for ModelManager {
             }
         );
 
-        // WhisperContext and AudioEmbedder are automatically dropped
+        // AudioEmbedder is automatically dropped
         // This Drop impl ensures we log the cleanup for observability
     }
 }

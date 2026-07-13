@@ -31,8 +31,8 @@ pub enum ConfigKey {
     PushoverUserKey,
     PushoverApiToken,
 
-    // Whisper model path (GGML format, e.g., ggml-base.en.bin)
-    WhisperModelPath,
+    // Path to the SpeechAnalyzer transcription helper binary
+    SpeechHelperPath,
 
     // STUN server for NAT traversal (optional)
     StunServer,
@@ -57,7 +57,7 @@ impl ConfigKey {
             ConfigKey::ListenDurationSecs => "LISTEN_DURATION_SECS",
             ConfigKey::PushoverUserKey => "PUSHOVER_USER_KEY",
             ConfigKey::PushoverApiToken => "PUSHOVER_API_TOKEN",
-            ConfigKey::WhisperModelPath => "WHISPER_MODEL_PATH",
+            ConfigKey::SpeechHelperPath => "SPEECH_HELPER_PATH",
             ConfigKey::StunServer => "STUN_SERVER",
             ConfigKey::MinAudioDurationMs => "MIN_AUDIO_DURATION_MS",
             ConfigKey::HealthPort => "HEALTH_PORT",
@@ -83,7 +83,7 @@ impl ConfigKey {
             ConfigKey::SipPort => Some("5060"),
             ConfigKey::ExpectedPhrase => Some("thank you for calling cubic machinery"),
             ConfigKey::ListenDurationSecs => Some("10"),
-            ConfigKey::WhisperModelPath => Some("./models/ggml-base.en.bin"),
+            ConfigKey::SpeechHelperPath => Some("./native/speech_helper"),
             ConfigKey::MinAudioDurationMs => Some("500"),
             _ => None,
         }
@@ -112,8 +112,8 @@ pub struct Config {
     pub pushover_user_key: String,
     pub pushover_api_token: String,
 
-    // Whisper model path (GGML format, e.g., ggml-base.en.bin)
-    pub whisper_model_path: String,
+    // Path to the SpeechAnalyzer transcription helper binary
+    pub speech_helper_path: String,
 
     // STUN server for NAT traversal (optional)
     pub stun_server: Option<String>,
@@ -175,8 +175,8 @@ impl Config {
             pushover_api_token: get(ConfigKey::PushoverApiToken)
                 .context(ConfigKey::PushoverApiToken.env_var())?,
 
-            whisper_model_path: get(ConfigKey::WhisperModelPath).unwrap_or_else(|| {
-                ConfigKey::WhisperModelPath
+            speech_helper_path: get(ConfigKey::SpeechHelperPath).unwrap_or_else(|| {
+                ConfigKey::SpeechHelperPath
                     .default_value()
                     .unwrap()
                     .to_string()
@@ -203,11 +203,12 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         let mut errors: Vec<String> = Vec::new();
 
-        // Validate Whisper model path exists
-        if !Path::new(&self.whisper_model_path).exists() {
+        // Validate speech helper binary exists
+        if !Path::new(&self.speech_helper_path).exists() {
             errors.push(format!(
-                "Whisper model not found at '{}'. Download from HuggingFace.",
-                self.whisper_model_path
+                "Speech helper not found at '{}'. Build it with: sh scripts/build_speech_helper.sh \
+                 (requires macOS 26+ and the Xcode command line tools).",
+                self.speech_helper_path
             ));
         }
 
@@ -283,7 +284,7 @@ mod tests {
         assert_eq!(config.sip_username, "testuser");
         assert_eq!(config.sip_port, 5060); // default
         assert_eq!(config.listen_duration_secs, 10); // default
-        assert_eq!(config.whisper_model_path, "./models/ggml-base.en.bin"); // default
+        assert_eq!(config.speech_helper_path, "./native/speech_helper"); // default
     }
 
     #[test]
@@ -389,11 +390,11 @@ mod tests {
     }
 
     #[test]
-    fn test_whisper_model_path_custom() {
+    fn test_speech_helper_path_custom() {
         let mut env = minimal_valid_env();
-        env.insert("WHISPER_MODEL_PATH", "/custom/path/model.bin");
+        env.insert("SPEECH_HELPER_PATH", "/custom/path/speech_helper");
         let config = Config::from_map(&env).expect("should parse");
-        assert_eq!(config.whisper_model_path, "/custom/path/model.bin");
+        assert_eq!(config.speech_helper_path, "/custom/path/speech_helper");
     }
 
     #[test]
@@ -505,7 +506,7 @@ mod tests {
             ListenDurationSecs,
             PushoverUserKey,
             PushoverApiToken,
-            WhisperModelPath,
+            SpeechHelperPath,
             StunServer,
             MinAudioDurationMs,
             HealthPort,
@@ -541,8 +542,8 @@ mod tests {
         );
         assert_eq!(ListenDurationSecs.default_value(), Some("10"));
         assert_eq!(
-            WhisperModelPath.default_value(),
-            Some("./models/ggml-base.en.bin")
+            SpeechHelperPath.default_value(),
+            Some("./native/speech_helper")
         );
         assert_eq!(MinAudioDurationMs.default_value(), Some("500"));
 

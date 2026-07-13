@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
 
     // Initialize speech recognizer (Mutex for interior mutability - embedding model needs &mut)
     let recognizer = Arc::new(std::sync::Mutex::new(SpeechRecognizer::new(
-        &config.whisper_model_path,
+        &config.speech_helper_path,
     )?));
 
     // Initialize notifier

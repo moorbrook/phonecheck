@@ -156,7 +156,7 @@ impl G711Decoder {
         }
     }
 
-    /// Convert PCM i16 samples to f32 for Whisper (normalized to -1.0 to 1.0)
+    /// Convert PCM i16 samples to f32 for speech processing (normalized to -1.0 to 1.0)
     #[inline]
     pub fn pcm_to_f32(samples: &[i16]) -> Vec<f32> {
         samples.iter().map(|&s| s as f32 / 32768.0).collect()

@@ -8,26 +8,27 @@ pub use receiver::RtpReceiver;
 use anyhow::{Context, Result};
 use std::path::Path;
 
-/// Audio sample rate for Whisper (Hz)
-pub const WHISPER_SAMPLE_RATE: u32 = 16000;
+/// Target audio sample rate for speech processing (Hz)
+/// Required by both the Wav2Vec2 embedder and the transcription helper input.
+pub const TARGET_SAMPLE_RATE: u32 = 16000;
 
 /// Convert duration in milliseconds to number of samples at 16kHz
 #[inline]
 pub fn duration_to_samples(duration_ms: u64) -> usize {
-    ((duration_ms as u64) * WHISPER_SAMPLE_RATE as u64 / 1000) as usize
+    ((duration_ms as u64) * TARGET_SAMPLE_RATE as u64 / 1000) as usize
 }
 
 /// Convert number of samples to duration in milliseconds at 16kHz
 #[inline]
 pub fn samples_to_duration_ms(samples: usize) -> u64 {
-    ((samples as u64) * 1000) / WHISPER_SAMPLE_RATE as u64
+    ((samples as u64) * 1000) / TARGET_SAMPLE_RATE as u64
 }
 
 /// Save f32 audio samples (16kHz) to a WAV file
 pub fn save_wav<P: AsRef<Path>>(samples: &[f32], path: P) -> Result<()> {
     let spec = hound::WavSpec {
         channels: 1,
-        sample_rate: WHISPER_SAMPLE_RATE,
+        sample_rate: TARGET_SAMPLE_RATE,
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
