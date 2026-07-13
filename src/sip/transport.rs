@@ -5,7 +5,6 @@
 /// - Timer A starts at T1 (500ms), doubles each retransmit
 /// - Timer B (transaction timeout) is 64*T1 = 32 seconds
 /// - Retransmission stops on any response
-
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -48,7 +47,9 @@ impl SipTransport {
 
     /// Get local address
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        self.socket.local_addr().context("Failed to get local address")
+        self.socket
+            .local_addr()
+            .context("Failed to get local address")
     }
 
     /// Send a SIP message to the server
@@ -292,7 +293,10 @@ mod tests {
         let t2 = SipTransport::new(addr).await.unwrap();
 
         // Both should bind to different ephemeral ports
-        assert_ne!(t1.local_addr().unwrap().port(), t2.local_addr().unwrap().port());
+        assert_ne!(
+            t1.local_addr().unwrap().port(),
+            t2.local_addr().unwrap().port()
+        );
     }
 
     #[tokio::test]

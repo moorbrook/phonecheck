@@ -145,16 +145,28 @@ impl Config {
             sip_port: get(ConfigKey::SipPort)
                 .unwrap_or_else(|| ConfigKey::SipPort.default_value().unwrap().to_string())
                 .parse()
-                .context(format!("{} must be a valid port number", ConfigKey::SipPort.env_var()))?,
+                .context(format!(
+                    "{} must be a valid port number",
+                    ConfigKey::SipPort.env_var()
+                ))?,
 
-            target_phone: get(ConfigKey::TargetPhone)
-                .context(ConfigKey::TargetPhone.env_var())?,
+            target_phone: get(ConfigKey::TargetPhone).context(ConfigKey::TargetPhone.env_var())?,
 
             expected_phrase: get(ConfigKey::ExpectedPhrase)
-                .unwrap_or_else(|| ConfigKey::ExpectedPhrase.default_value().unwrap().to_string())
+                .unwrap_or_else(|| {
+                    ConfigKey::ExpectedPhrase
+                        .default_value()
+                        .unwrap()
+                        .to_string()
+                })
                 .to_lowercase(),
             listen_duration_secs: get(ConfigKey::ListenDurationSecs)
-                .unwrap_or_else(|| ConfigKey::ListenDurationSecs.default_value().unwrap().to_string())
+                .unwrap_or_else(|| {
+                    ConfigKey::ListenDurationSecs
+                        .default_value()
+                        .unwrap()
+                        .to_string()
+                })
                 .parse()
                 .unwrap_or(10),
 
@@ -163,13 +175,12 @@ impl Config {
             pushover_api_token: get(ConfigKey::PushoverApiToken)
                 .context(ConfigKey::PushoverApiToken.env_var())?,
 
-            whisper_model_path: get(ConfigKey::WhisperModelPath)
-                .unwrap_or_else(|| {
-                    ConfigKey::WhisperModelPath
-                        .default_value()
-                        .unwrap()
-                        .to_string()
-                }),
+            whisper_model_path: get(ConfigKey::WhisperModelPath).unwrap_or_else(|| {
+                ConfigKey::WhisperModelPath
+                    .default_value()
+                    .unwrap()
+                    .to_string()
+            }),
 
             stun_server: get(ConfigKey::StunServer).filter(|s| !s.is_empty()),
 
@@ -272,10 +283,7 @@ mod tests {
         assert_eq!(config.sip_username, "testuser");
         assert_eq!(config.sip_port, 5060); // default
         assert_eq!(config.listen_duration_secs, 10); // default
-        assert_eq!(
-            config.whisper_model_path,
-            "./models/ggml-base.en.bin"
-        ); // default
+        assert_eq!(config.whisper_model_path, "./models/ggml-base.en.bin"); // default
     }
 
     #[test]
@@ -293,7 +301,11 @@ mod tests {
         let result = Config::from_map(&env);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("SIP_PORT"), "error should mention SIP_PORT: {}", err);
+        assert!(
+            err.contains("SIP_PORT"),
+            "error should mention SIP_PORT: {}",
+            err
+        );
     }
 
     #[test]
@@ -303,7 +315,10 @@ mod tests {
         let result = Config::from_map(&env);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("SIP_USERNAME"), "error should mention SIP_USERNAME");
+        assert!(
+            err.contains("SIP_USERNAME"),
+            "error should mention SIP_USERNAME"
+        );
     }
 
     #[test]
@@ -313,7 +328,10 @@ mod tests {
         let result = Config::from_map(&env);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("SIP_PASSWORD"), "error should mention SIP_PASSWORD");
+        assert!(
+            err.contains("SIP_PASSWORD"),
+            "error should mention SIP_PASSWORD"
+        );
     }
 
     #[test]
@@ -323,7 +341,10 @@ mod tests {
         let result = Config::from_map(&env);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("TARGET_PHONE"), "error should mention TARGET_PHONE");
+        assert!(
+            err.contains("TARGET_PHONE"),
+            "error should mention TARGET_PHONE"
+        );
     }
 
     #[test]
@@ -334,7 +355,12 @@ mod tests {
             let result = Config::from_map(&env);
             assert!(result.is_err(), "{} should be required", field);
             let err = result.unwrap_err().to_string();
-            assert!(err.contains(field), "error should mention {}: {}", field, err);
+            assert!(
+                err.contains(field),
+                "error should mention {}: {}",
+                field,
+                err
+            );
         }
     }
 
@@ -443,7 +469,11 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("too long"), "error should mention duration too long: {}", err);
+        assert!(
+            err.contains("too long"),
+            "error should mention duration too long: {}",
+            err
+        );
     }
 
     #[test]
@@ -454,7 +484,11 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("TARGET_PHONE"), "error should mention invalid phone: {}", err);
+        assert!(
+            err.contains("TARGET_PHONE"),
+            "error should mention invalid phone: {}",
+            err
+        );
     }
 
     #[test]
@@ -501,9 +535,15 @@ mod tests {
         // Test that keys with defaults return them
         use ConfigKey::*;
         assert_eq!(SipPort.default_value(), Some("5060"));
-        assert_eq!(ExpectedPhrase.default_value(), Some("thank you for calling cubic machinery"));
+        assert_eq!(
+            ExpectedPhrase.default_value(),
+            Some("thank you for calling cubic machinery")
+        );
         assert_eq!(ListenDurationSecs.default_value(), Some("10"));
-        assert_eq!(WhisperModelPath.default_value(), Some("./models/ggml-base.en.bin"));
+        assert_eq!(
+            WhisperModelPath.default_value(),
+            Some("./models/ggml-base.en.bin")
+        );
         assert_eq!(MinAudioDurationMs.default_value(), Some("500"));
 
         // Keys without defaults
@@ -520,15 +560,15 @@ mod proptests {
 
     fn valid_env_strategy() -> impl Strategy<Value = HashMap<&'static str, String>> {
         (
-            "[a-z]{3,10}",           // sip_username
-            "[a-z0-9]{8,16}",        // sip_password
-            "[a-z]+\\.[a-z]{2,4}",   // sip_server
-            1u16..=65535u16,         // sip_port
-            "[0-9]{10}",             // target_phone
-            "[a-z ]{5,30}",          // expected_phrase
-            1u64..=300u64,           // listen_duration
-            "[a-z0-9]{20,30}",       // pushover_user_key
-            "[a-z0-9]{20,30}",       // pushover_api_token
+            "[a-z]{3,10}",         // sip_username
+            "[a-z0-9]{8,16}",      // sip_password
+            "[a-z]+\\.[a-z]{2,4}", // sip_server
+            1u16..=65535u16,       // sip_port
+            "[0-9]{10}",           // target_phone
+            "[a-z ]{5,30}",        // expected_phrase
+            1u64..=300u64,         // listen_duration
+            "[a-z0-9]{20,30}",     // pushover_user_key
+            "[a-z0-9]{20,30}",     // pushover_api_token
         )
             .prop_map(
                 |(user, pass, server, port, phone, phrase, duration, po_user, po_token)| {

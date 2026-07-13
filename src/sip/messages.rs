@@ -273,7 +273,16 @@ pub fn build_register(
     cseq: u32,
     local_addr: SocketAddr,
 ) -> String {
-    build_register_internal(server, from_uri, from_display, call_id, from_tag, cseq, local_addr, None)
+    build_register_internal(
+        server,
+        from_uri,
+        from_display,
+        call_id,
+        from_tag,
+        cseq,
+        local_addr,
+        None,
+    )
 }
 
 /// Build SIP REGISTER with Authorization header for digest authentication
@@ -287,7 +296,16 @@ pub fn build_register_with_auth(
     local_addr: SocketAddr,
     authorization: &str,
 ) -> String {
-    build_register_internal(server, from_uri, from_display, call_id, from_tag, cseq, local_addr, Some(authorization))
+    build_register_internal(
+        server,
+        from_uri,
+        from_display,
+        call_id,
+        from_tag,
+        cseq,
+        local_addr,
+        Some(authorization),
+    )
 }
 
 fn build_register_internal(
@@ -410,7 +428,9 @@ pub fn extract_via_received(response: &str) -> Option<std::net::IpAddr> {
 /// Parses c= (connection) and m= (media) lines to get IP and port
 pub fn extract_rtp_address(response: &str) -> Option<std::net::SocketAddr> {
     // Find SDP body (after empty line)
-    let sdp_start = response.find("\r\n\r\n").map(|i| i + 4)
+    let sdp_start = response
+        .find("\r\n\r\n")
+        .map(|i| i + 4)
         .or_else(|| response.find("\n\n").map(|i| i + 2))?;
     let sdp = &response[sdp_start..];
 
@@ -475,7 +495,10 @@ mod tests {
         // RFC 3261 requires branch to start with "z9hG4bK"
         for _ in 0..10 {
             let branch = generate_branch();
-            assert!(branch.starts_with("z9hG4bK"), "branch must start with magic cookie");
+            assert!(
+                branch.starts_with("z9hG4bK"),
+                "branch must start with magic cookie"
+            );
             assert!(branch.len() > 7, "branch must have random component");
         }
     }
@@ -500,13 +523,19 @@ mod tests {
         // 1xx Provisional
         assert_eq!(parse_status_code("SIP/2.0 100 Trying\r\n"), Some(100));
         assert_eq!(parse_status_code("SIP/2.0 180 Ringing\r\n"), Some(180));
-        assert_eq!(parse_status_code("SIP/2.0 183 Session Progress\r\n"), Some(183));
+        assert_eq!(
+            parse_status_code("SIP/2.0 183 Session Progress\r\n"),
+            Some(183)
+        );
 
         // 2xx Success
         assert_eq!(parse_status_code("SIP/2.0 200 OK\r\n"), Some(200));
 
         // 3xx Redirection
-        assert_eq!(parse_status_code("SIP/2.0 302 Moved Temporarily\r\n"), Some(302));
+        assert_eq!(
+            parse_status_code("SIP/2.0 302 Moved Temporarily\r\n"),
+            Some(302)
+        );
 
         // 4xx Client Error
         assert_eq!(parse_status_code("SIP/2.0 400 Bad Request\r\n"), Some(400));
@@ -516,8 +545,14 @@ mod tests {
         assert_eq!(parse_status_code("SIP/2.0 486 Busy Here\r\n"), Some(486));
 
         // 5xx Server Error
-        assert_eq!(parse_status_code("SIP/2.0 500 Server Internal Error\r\n"), Some(500));
-        assert_eq!(parse_status_code("SIP/2.0 503 Service Unavailable\r\n"), Some(503));
+        assert_eq!(
+            parse_status_code("SIP/2.0 500 Server Internal Error\r\n"),
+            Some(500)
+        );
+        assert_eq!(
+            parse_status_code("SIP/2.0 503 Service Unavailable\r\n"),
+            Some(503)
+        );
 
         // 6xx Global Failure
         assert_eq!(parse_status_code("SIP/2.0 603 Decline\r\n"), Some(603));

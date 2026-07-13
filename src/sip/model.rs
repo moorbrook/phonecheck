@@ -2,19 +2,22 @@
 /// Formally verifies the call flow: INVITE → 200 OK → ACK → RTP → BYE
 ///
 /// Run with: cargo test --release sip_model -- --nocapture
-
 use stateright::*;
 
 /// Call states matching the actual SIP client implementation
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum CallState {
     Idle,
-    Inviting { retries: u8 },
+    Inviting {
+        retries: u8,
+    },
     Proceeding,
     /// Received 401/407, about to retry with auth
     Authenticating,
     /// Sent authenticated INVITE, waiting for response
-    InvitingWithAuth { retries: u8 },
+    InvitingWithAuth {
+        retries: u8,
+    },
     Established,
     Terminating,
     Terminated,
@@ -181,17 +184,15 @@ impl Model for SipCallChecker {
                 }
             }
 
-            SipAction::Receive100Trying => {
-                match state.state {
-                    CallState::Inviting { .. } => {
-                        next.state = CallState::Proceeding;
-                    }
-                    CallState::InvitingWithAuth { .. } => {
-                        next.state = CallState::Proceeding;
-                    }
-                    _ => {}
+            SipAction::Receive100Trying => match state.state {
+                CallState::Inviting { .. } => {
+                    next.state = CallState::Proceeding;
                 }
-            }
+                CallState::InvitingWithAuth { .. } => {
+                    next.state = CallState::Proceeding;
+                }
+                _ => {}
+            },
 
             SipAction::Receive180Ringing => {
                 if matches!(
@@ -246,29 +247,27 @@ impl Model for SipCallChecker {
                 }
             }
 
-            SipAction::InviteTimeout => {
-                match state.state {
-                    CallState::Inviting { retries } => {
-                        if retries < self.max_retries {
-                            next.state = CallState::Inviting {
-                                retries: retries + 1,
-                            };
-                        } else {
-                            next.state = CallState::Failed;
-                        }
+            SipAction::InviteTimeout => match state.state {
+                CallState::Inviting { retries } => {
+                    if retries < self.max_retries {
+                        next.state = CallState::Inviting {
+                            retries: retries + 1,
+                        };
+                    } else {
+                        next.state = CallState::Failed;
                     }
-                    CallState::InvitingWithAuth { retries } => {
-                        if retries < self.max_retries {
-                            next.state = CallState::InvitingWithAuth {
-                                retries: retries + 1,
-                            };
-                        } else {
-                            next.state = CallState::Failed;
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                CallState::InvitingWithAuth { retries } => {
+                    if retries < self.max_retries {
+                        next.state = CallState::InvitingWithAuth {
+                            retries: retries + 1,
+                        };
+                    } else {
+                        next.state = CallState::Failed;
+                    }
+                }
+                _ => {}
+            },
 
             SipAction::SendAuthenticatedInvite => {
                 if state.state == CallState::Authenticating {
@@ -321,10 +320,8 @@ impl Model for SipCallChecker {
             }),
             // Safety: When terminated or failed, RTP must be inactive
             Property::always("clean_termination", |_, state: &CallModel| {
-                !matches!(
-                    state.state,
-                    CallState::Terminated | CallState::Failed
-                ) || !state.rtp_active
+                !matches!(state.state, CallState::Terminated | CallState::Failed)
+                    || !state.rtp_active
             }),
             // Safety: BYE must be sent before entering terminating state
             Property::always("bye_before_terminating", |_, state: &CallModel| {
@@ -409,9 +406,7 @@ mod tests {
         assert_eq!(state.state, CallState::Idle);
 
         // Send INVITE
-        state = model
-            .next_state(&state, SipAction::SendInvite)
-            .unwrap();
+        state = model.next_state(&state, SipAction::SendInvite).unwrap();
         assert!(matches!(state.state, CallState::Inviting { retries: 0 }));
 
         // Receive 100 Trying
@@ -421,9 +416,7 @@ mod tests {
         assert_eq!(state.state, CallState::Proceeding);
 
         // Receive 200 OK
-        state = model
-            .next_state(&state, SipAction::Receive200Ok)
-            .unwrap();
+        state = model.next_state(&state, SipAction::Receive200Ok).unwrap();
         assert_eq!(state.state, CallState::Established);
         assert!(state.rtp_active);
 
@@ -434,9 +427,7 @@ mod tests {
         assert_eq!(state.rtp_packets, 5);
 
         // Audio complete, send BYE
-        state = model
-            .next_state(&state, SipAction::AudioComplete)
-            .unwrap();
+        state = model.next_state(&state, SipAction::AudioComplete).unwrap();
         assert_eq!(state.state, CallState::Terminating);
         assert!(!state.rtp_active);
         assert!(state.bye_sent);
@@ -453,9 +444,7 @@ mod tests {
         let mut state = init_with_password();
 
         // Send INVITE
-        state = model
-            .next_state(&state, SipAction::SendInvite)
-            .unwrap();
+        state = model.next_state(&state, SipAction::SendInvite).unwrap();
 
         // Receive 486 Busy (4xx error)
         state = model.next_state(&state, SipAction::Receive4xx).unwrap();
@@ -470,21 +459,15 @@ mod tests {
         let mut state = init_with_password();
 
         // Send INVITE
-        state = model
-            .next_state(&state, SipAction::SendInvite)
-            .unwrap();
+        state = model.next_state(&state, SipAction::SendInvite).unwrap();
         assert!(matches!(state.state, CallState::Inviting { retries: 0 }));
 
         // Timeout and retry
-        state = model
-            .next_state(&state, SipAction::InviteTimeout)
-            .unwrap();
+        state = model.next_state(&state, SipAction::InviteTimeout).unwrap();
         assert!(matches!(state.state, CallState::Inviting { retries: 1 }));
 
         // Eventually get 200 OK
-        state = model
-            .next_state(&state, SipAction::Receive200Ok)
-            .unwrap();
+        state = model.next_state(&state, SipAction::Receive200Ok).unwrap();
         assert_eq!(state.state, CallState::Established);
     }
 
@@ -496,9 +479,7 @@ mod tests {
         let mut state = init_with_password();
 
         // Send INVITE
-        state = model
-            .next_state(&state, SipAction::SendInvite)
-            .unwrap();
+        state = model.next_state(&state, SipAction::SendInvite).unwrap();
         assert!(matches!(state.state, CallState::Inviting { retries: 0 }));
 
         // Receive 401 Unauthorized
@@ -519,9 +500,7 @@ mod tests {
         assert!(state.auth_attempted);
 
         // Receive 200 OK
-        state = model
-            .next_state(&state, SipAction::Receive200Ok)
-            .unwrap();
+        state = model.next_state(&state, SipAction::Receive200Ok).unwrap();
         assert_eq!(state.state, CallState::Established);
         assert!(state.rtp_active);
     }
@@ -534,9 +513,7 @@ mod tests {
         let mut state = init_without_password();
 
         // Send INVITE
-        state = model
-            .next_state(&state, SipAction::SendInvite)
-            .unwrap();
+        state = model.next_state(&state, SipAction::SendInvite).unwrap();
 
         // Receive 401 Unauthorized - should fail directly without password
         state = model
@@ -553,9 +530,7 @@ mod tests {
         let mut state = init_with_password();
 
         // Send INVITE
-        state = model
-            .next_state(&state, SipAction::SendInvite)
-            .unwrap();
+        state = model.next_state(&state, SipAction::SendInvite).unwrap();
 
         // Receive 401
         state = model

@@ -4,7 +4,6 @@
 /// to a STUN server and parsing the XOR-MAPPED-ADDRESS response.
 ///
 /// Reference: RFC 5389 - Session Traversal Utilities for NAT (STUN)
-
 use anyhow::{Context, Result};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::Duration;
@@ -41,18 +40,19 @@ pub async fn discover_public_address(stun_server: &str) -> Result<SocketAddr> {
     info!("Querying STUN server {} for public address", stun_server);
 
     // Run blocking STUN query in a separate thread
-    let result = tokio::task::spawn_blocking(move || {
-        stun_binding_request(server_addr)
-    })
-    .await
-    .context("STUN task failed")??;
+    let result = tokio::task::spawn_blocking(move || stun_binding_request(server_addr))
+        .await
+        .context("STUN task failed")??;
 
     info!("STUN discovered public address: {}", result);
     Ok(result)
 }
 
 /// Perform synchronous STUN binding request using a provided socket
-pub fn stun_binding_request_on_socket(socket: &UdpSocket, server_addr: SocketAddr) -> Result<SocketAddr> {
+pub fn stun_binding_request_on_socket(
+    socket: &UdpSocket,
+    server_addr: SocketAddr,
+) -> Result<SocketAddr> {
     socket
         .set_read_timeout(Some(STUN_TIMEOUT))
         .context("Failed to set socket timeout")?;
@@ -83,8 +83,7 @@ pub fn stun_binding_request_on_socket(socket: &UdpSocket, server_addr: SocketAdd
 /// Perform synchronous STUN binding request
 fn stun_binding_request(server_addr: SocketAddr) -> Result<SocketAddr> {
     // Create UDP socket
-    let socket = UdpSocket::bind("0.0.0.0:0")
-        .context("Failed to bind STUN socket")?;
+    let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to bind STUN socket")?;
     stun_binding_request_on_socket(&socket, server_addr)
 }
 
@@ -230,7 +229,10 @@ fn parse_mapped_address(data: &[u8]) -> Result<SocketAddr> {
 }
 
 /// Discover public address using an existing Tokio UDP socket
-pub async fn discover_public_address_tokio(socket: &tokio::net::UdpSocket, stun_server: &str) -> Result<SocketAddr> {
+pub async fn discover_public_address_tokio(
+    socket: &tokio::net::UdpSocket,
+    stun_server: &str,
+) -> Result<SocketAddr> {
     let server_addr = stun_server
         .to_socket_addrs()
         .context(format!("Failed to resolve STUN server: {}", stun_server))?
@@ -370,8 +372,12 @@ mod tests {
     async fn test_discover_public_address_optional_invalid_server() {
         // When STUN server is unreachable, should return None (fallback)
         // Use an invalid hostname that will fail DNS resolution
-        let result = discover_public_address_optional(Some("invalid.nonexistent.domain.test:3478")).await;
-        assert!(result.is_none(), "Should gracefully return None on STUN failure");
+        let result =
+            discover_public_address_optional(Some("invalid.nonexistent.domain.test:3478")).await;
+        assert!(
+            result.is_none(),
+            "Should gracefully return None on STUN failure"
+        );
     }
 
     #[tokio::test]

@@ -202,6 +202,49 @@ pub async fn run_scheduler_with_shutdown<F, Fut>(
 /// Timeout for graceful shutdown of in-flight calls
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Await an in-flight check while watching for shutdown.
+///
+/// If shutdown is requested mid-check, the cancellation token is triggered and
+/// the SAME check future keeps being polled (it is pinned, not dropped) so the
+/// check can send SIP BYE and clean up, bounded by GRACEFUL_SHUTDOWN_TIMEOUT.
+///
+/// Returns true if shutdown was requested during the check.
+async fn await_check_with_shutdown<Fut>(
+    check_future: Fut,
+    cancel_token: &CancellationToken,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> bool
+where
+    Fut: std::future::Future<Output = ()>,
+{
+    tokio::pin!(check_future);
+    let mut shutdown_requested = false;
+
+    loop {
+        tokio::select! {
+            _ = &mut check_future => {
+                if shutdown_requested {
+                    info!("In-flight check completed gracefully after cancellation");
+                }
+                return shutdown_requested;
+            }
+            _ = shutdown_rx.changed(), if !shutdown_requested => {
+                if *shutdown_rx.borrow() {
+                    info!("Shutdown during active check - signaling cancellation");
+                    cancel_token.cancel();
+                    info!("Waiting for in-flight call to complete gracefully...");
+                    shutdown_requested = true;
+                }
+                // Spurious wake (no shutdown): keep polling the check future.
+            }
+            _ = sleep(GRACEFUL_SHUTDOWN_TIMEOUT), if shutdown_requested => {
+                warn!("Graceful shutdown timeout - check may not have completed cleanly");
+                return true;
+            }
+        }
+    }
+}
+
 /// Internal scheduler implementation with explicit check guard
 async fn run_scheduler_with_shutdown_and_guard<F, Fut>(
     check_fn: &mut F,
@@ -256,31 +299,12 @@ async fn run_scheduler_with_shutdown_and_guard<F, Fut>(
                 let cancel_token = CancellationToken::new();
                 let check_token = cancel_token.clone();
 
-                // Spawn the check and wait for it with shutdown awareness
+                // Run the check and wait for it with shutdown awareness
                 let check_future = check_fn(check_token);
-
-                tokio::select! {
-                    _ = check_future => {
-                        // Check completed normally
-                    }
-                    _ = shutdown_rx.changed() => {
-                        if *shutdown_rx.borrow() {
-                            info!("Shutdown during active check - signaling cancellation");
-                            cancel_token.cancel();
-
-                            // Wait for graceful shutdown with timeout
-                            // The check should send BYE and clean up
-                            info!("Waiting for in-flight call to complete gracefully...");
-                            tokio::select! {
-                                _ = sleep(GRACEFUL_SHUTDOWN_TIMEOUT) => {
-                                    warn!("Graceful shutdown timeout - check may not have completed cleanly");
-                                }
-                                // Note: we can't await the original future again after select
-                                // The check_fn should handle cancellation internally
-                            }
-                            break;
-                        }
-                    }
+                let shutdown_requested =
+                    await_check_with_shutdown(check_future, &cancel_token, shutdown_rx).await;
+                if shutdown_requested {
+                    break;
                 }
                 // Guard is dropped here, releasing the lock
             } else {
@@ -362,7 +386,7 @@ mod tests {
         assert!(is_business_hours_with_tolerance_at(17, 0, 0)); // exactly 5pm
         assert!(is_business_hours_with_tolerance_at(17, 0, 15)); // 15 seconds past
         assert!(is_business_hours_with_tolerance_at(17, 0, 29)); // 29 seconds past
-        // But 30+ seconds past should not
+                                                                 // But 30+ seconds past should not
         assert!(!is_business_hours_with_tolerance_at(17, 0, 30));
         assert!(!is_business_hours_with_tolerance_at(17, 1, 0)); // 1 minute past
     }
@@ -572,6 +596,65 @@ mod tests {
             .expect("Scheduler should complete without panic");
     }
 
+    // === Graceful shutdown regression tests ===
+
+    /// Regression test: shutdown during an active check must NOT drop the
+    /// check future. The old code selected over the future by value, so the
+    /// in-flight SIP call was aborted (no BYE) the moment shutdown arrived,
+    /// then pointlessly slept 10s. The fixed code pins the future and keeps
+    /// polling it after cancellation so cleanup actually runs.
+    #[tokio::test]
+    async fn test_check_future_survives_shutdown_and_finishes_cleanup() {
+        let (tx, mut rx) = watch::channel(false);
+        let cancel_token = CancellationToken::new();
+        let cleanup_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cleanup_done_clone = cleanup_done.clone();
+        let check_token = cancel_token.clone();
+
+        let check_future = async move {
+            // Simulate a call: wait for cancellation, then do cleanup work
+            // (analogous to sending SIP BYE) before completing.
+            check_token.cancelled().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cleanup_done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        };
+
+        // Request shutdown shortly after the check starts
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = tx.send(true);
+        });
+
+        let shutdown_requested = tokio::time::timeout(
+            Duration::from_secs(2),
+            await_check_with_shutdown(check_future, &cancel_token, &mut rx),
+        )
+        .await
+        .expect("await_check_with_shutdown should complete well within timeout");
+
+        assert!(shutdown_requested, "shutdown should have been observed");
+        assert!(
+            cleanup_done.load(std::sync::atomic::Ordering::SeqCst),
+            "check future must be polled to completion after cancellation (cleanup/BYE must run)"
+        );
+    }
+
+    /// A check that ignores cancellation is bounded by the graceful timeout.
+    #[tokio::test(start_paused = true)]
+    async fn test_graceful_shutdown_timeout_bounds_stuck_check() {
+        let (tx, mut rx) = watch::channel(false);
+        let cancel_token = CancellationToken::new();
+
+        // Check that never completes and ignores the cancellation token
+        let check_future = std::future::pending::<()>();
+
+        tx.send(true).unwrap();
+
+        let shutdown_requested =
+            await_check_with_shutdown(check_future, &cancel_token, &mut rx).await;
+        assert!(shutdown_requested);
+    }
+
     // === Concurrent check prevention tests ===
 
     #[test]
@@ -612,7 +695,7 @@ mod tests {
         // In spring, clocks jump from 2am to 3am (Pacific)
         // This shouldn't affect business hours (8am-5pm)
         // The hour 2am doesn't exist on this day
-        use chrono::{NaiveDate, NaiveTime, NaiveDateTime, TimeZone};
+        use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 
         // March 10, 2024 is a DST transition day (spring forward)
         // Before transition (1:59 AM PST = UTC-8)
@@ -622,7 +705,11 @@ mod tests {
         );
         let la_before = Los_Angeles.from_utc_datetime(&before);
         // At 9:59 UTC on March 10, it's 1:59 AM PST (before transition)
-        assert!(!is_business_hours_at(la_before.hour(), la_before.minute(), la_before.second()));
+        assert!(!is_business_hours_at(
+            la_before.hour(),
+            la_before.minute(),
+            la_before.second()
+        ));
 
         // After transition (3:00 AM PDT = UTC-7, so 10:00 UTC = 3:00 AM)
         let after = NaiveDateTime::new(
@@ -631,7 +718,11 @@ mod tests {
         );
         let la_after = Los_Angeles.from_utc_datetime(&after);
         // At 10:00 UTC on March 10, it's 3:00 AM PDT (after transition)
-        assert!(!is_business_hours_at(la_after.hour(), la_after.minute(), la_after.second()));
+        assert!(!is_business_hours_at(
+            la_after.hour(),
+            la_after.minute(),
+            la_after.second()
+        ));
 
         // Business hours should still work correctly
         // 8:00 AM PDT on March 10 = 15:00 UTC
@@ -641,14 +732,18 @@ mod tests {
         );
         let la_business = Los_Angeles.from_utc_datetime(&business_start);
         assert_eq!(la_business.hour(), 8);
-        assert!(is_business_hours_at(la_business.hour(), la_business.minute(), la_business.second()));
+        assert!(is_business_hours_at(
+            la_business.hour(),
+            la_business.minute(),
+            la_business.second()
+        ));
     }
 
     #[test]
     fn test_dst_fall_back() {
         // In fall, clocks fall back from 2am to 1am (Pacific)
         // The hour 1am exists twice on this day
-        use chrono::{NaiveDate, NaiveTime, NaiveDateTime, TimeZone};
+        use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 
         // November 3, 2024 is a DST transition day (fall back)
         // First 1:30 AM PDT = 8:30 UTC
@@ -657,7 +752,11 @@ mod tests {
             NaiveTime::from_hms_opt(8, 30, 0).unwrap(),
         );
         let la_first = Los_Angeles.from_utc_datetime(&first_130);
-        assert!(!is_business_hours_at(la_first.hour(), la_first.minute(), la_first.second()));
+        assert!(!is_business_hours_at(
+            la_first.hour(),
+            la_first.minute(),
+            la_first.second()
+        ));
 
         // Second 1:30 AM PST = 9:30 UTC
         let second_130 = NaiveDateTime::new(
@@ -665,7 +764,11 @@ mod tests {
             NaiveTime::from_hms_opt(9, 30, 0).unwrap(),
         );
         let la_second = Los_Angeles.from_utc_datetime(&second_130);
-        assert!(!is_business_hours_at(la_second.hour(), la_second.minute(), la_second.second()));
+        assert!(!is_business_hours_at(
+            la_second.hour(),
+            la_second.minute(),
+            la_second.second()
+        ));
 
         // Business hours should still work correctly
         // 8:00 AM PST on Nov 3 = 16:00 UTC
@@ -675,13 +778,17 @@ mod tests {
         );
         let la_business = Los_Angeles.from_utc_datetime(&business_start);
         assert_eq!(la_business.hour(), 8);
-        assert!(is_business_hours_at(la_business.hour(), la_business.minute(), la_business.second()));
+        assert!(is_business_hours_at(
+            la_business.hour(),
+            la_business.minute(),
+            la_business.second()
+        ));
     }
 
     #[test]
     fn test_time_until_next_check_during_dst_transition() {
         // Verify that time calculations don't panic during DST transitions
-        use chrono::{NaiveDate, NaiveTime, NaiveDateTime, TimeZone};
+        use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 
         // Test around spring forward (March 10, 2024)
         for hour in 0..24 {
@@ -773,7 +880,10 @@ mod kani_proofs {
 
         // Verify the result matches our expectation
         let expected = hour >= BUSINESS_START_HOUR && hour < BUSINESS_END_HOUR;
-        kani::assert(result == expected, "business hours check must be consistent");
+        kani::assert(
+            result == expected,
+            "business hours check must be consistent",
+        );
     }
 
     #[kani::proof]

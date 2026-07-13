@@ -62,7 +62,7 @@ fn malformed_port() -> impl Strategy<Value = String> {
         Just("NaN".to_string()),
         Just("Infinity".to_string()),
         // Unicode digits
-        Just("٥٠٦٠".to_string()),  // Arabic-Indic digits for 5060
+        Just("٥٠٦٠".to_string()),     // Arabic-Indic digits for 5060
         Just("５０６０".to_string()), // Fullwidth digits
         // Injection
         Just("5060; DROP TABLE".to_string()),
@@ -87,22 +87,22 @@ fn dangerous_phone() -> impl Strategy<Value = String> {
         Just("123".to_string()),
         Just("12345678901234567890".to_string()),
         // Unicode digits
-        Just("٥٥٥١٢٣٤٥٦٧".to_string()),  // Arabic-Indic
+        Just("٥٥٥١٢٣٤٥٦٧".to_string()),           // Arabic-Indic
         Just("５５５１２３４５６７".to_string()), // Fullwidth
         // Control characters
         Just("555\x001234567".to_string()),
         Just("555\t1234567".to_string()),
         Just("555\n1234567".to_string()),
         // Zero-width characters
-        Just("555\u{200B}1234567".to_string()),  // zero-width space
-        Just("555\u{200D}1234567".to_string()),  // zero-width joiner
+        Just("555\u{200B}1234567".to_string()), // zero-width space
+        Just("555\u{200D}1234567".to_string()), // zero-width joiner
         // Special chars
         Just("555-123-4567".to_string()),
         Just("(555) 123-4567".to_string()),
         Just("+1 (555) 123-4567".to_string()),
         // International
-        Just("+447911123456".to_string()),  // UK
-        Just("+81312345678".to_string()),   // Japan
+        Just("+447911123456".to_string()), // UK
+        Just("+81312345678".to_string()),  // Japan
         // Injection attempts
         Just("5551234567; --".to_string()),
         Just("5551234567\x00".to_string()),
@@ -157,8 +157,14 @@ fn base_valid_config() -> HashMap<&'static str, String> {
     m.insert("SIP_PASSWORD", "pass".to_string());
     m.insert("SIP_SERVER", "sip.example.com".to_string());
     m.insert("TARGET_PHONE", "5551234567".to_string());
-    m.insert("PUSHOVER_USER_KEY", "uQiRzpo4DXghDmr9QzzfQu27cmVRsG".to_string());
-    m.insert("PUSHOVER_API_TOKEN", "azGDORePK8gMaC0QOYAMyEEuzJnyUi".to_string());
+    m.insert(
+        "PUSHOVER_USER_KEY",
+        "uQiRzpo4DXghDmr9QzzfQu27cmVRsG".to_string(),
+    );
+    m.insert(
+        "PUSHOVER_API_TOKEN",
+        "azGDORePK8gMaC0QOYAMyEEuzJnyUi".to_string(),
+    );
     m
 }
 
@@ -297,11 +303,7 @@ fn test_port_boundary_values() {
         let mut env = base_valid_config();
         env.insert("SIP_PORT", port.to_string());
         let config = Config::from_getter(|key| env.get(key.env_var()).cloned());
-        assert!(
-            config.is_ok(),
-            "Port {} should be valid",
-            port
-        );
+        assert!(config.is_ok(), "Port {} should be valid", port);
         assert_eq!(config.unwrap().sip_port, port.parse::<u16>().unwrap());
     }
 }
@@ -309,12 +311,12 @@ fn test_port_boundary_values() {
 #[test]
 fn test_port_invalid_values() {
     let invalid_ports = [
-        ("65536", false),    // overflow - fails
-        ("-1", false),       // negative - fails
-        ("abc", false),      // non-numeric - fails
-        ("", false),         // empty - fails (parse error on empty string)
-        ("5060.5", false),   // float - fails
-        ("1e5", false),      // scientific - fails
+        ("65536", false),  // overflow - fails
+        ("-1", false),     // negative - fails
+        ("abc", false),    // non-numeric - fails
+        ("", false),       // empty - fails (parse error on empty string)
+        ("5060.5", false), // float - fails
+        ("1e5", false),    // scientific - fails
     ];
 
     for (port, should_succeed) in invalid_ports {
@@ -418,8 +420,8 @@ fn test_phone_valid_formats() {
     // Note: validate() checks DNS and file existence which fail in tests,
     // so we just verify the config parses and stores the phone correctly.
     let valid = [
-        "5551234567",  // 10 digits
-        "9095551234",  // 10 digits
+        "5551234567", // 10 digits
+        "9095551234", // 10 digits
     ];
 
     for phone in valid {
@@ -436,10 +438,10 @@ fn test_phone_invalid_formats_parsing() {
     // Note: Full validation testing is in src/config.rs unit tests.
     // Here we just verify from_getter parses any phone format without panicking.
     let phones = [
-        "",                    // Empty
-        "123",                 // Too short
-        "12345678901",         // 11 digits (too long)
-        "abcdefghij",          // Non-numeric
+        "",            // Empty
+        "123",         // Too short
+        "12345678901", // 11 digits (too long)
+        "abcdefghij",  // Non-numeric
     ];
 
     for phone in phones {
@@ -472,7 +474,10 @@ fn test_stun_server_empty_vs_missing() {
     let mut env = base_valid_config();
     env.insert("STUN_SERVER", "stun.example.com:3478".to_string());
     let config = Config::from_getter(|key| env.get(key.env_var()).cloned()).unwrap();
-    assert_eq!(config.stun_server, Some("stun.example.com:3478".to_string()));
+    assert_eq!(
+        config.stun_server,
+        Some("stun.example.com:3478".to_string())
+    );
 }
 
 // ============================================================================

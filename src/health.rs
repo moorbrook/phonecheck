@@ -116,7 +116,10 @@ pub async fn run_health_server(
         }
     };
 
-    info!("Health check server listening on http://0.0.0.0:{}/health", port);
+    info!(
+        "Health check server listening on http://0.0.0.0:{}/health",
+        port
+    );
 
     loop {
         tokio::select! {
@@ -589,20 +592,26 @@ mod state_machine {
         fn properties(&self) -> Vec<Property<Self>> {
             vec![
                 // Invariant: total operations = successful + failed
-                Property::always("total_count_consistent", |_: &Self, state: &MetricsState| {
-                    state.successful + state.failed <= 5 // Use constant since self not accessible
-                }),
+                Property::always(
+                    "total_count_consistent",
+                    |_: &Self, state: &MetricsState| {
+                        state.successful + state.failed <= 5 // Use constant since self not accessible
+                    },
+                ),
                 // Invariant: if last operation was success, last_ok is true
                 // (This is implicitly maintained by the state machine)
-                Property::always("last_ok_reflects_last_action", |_: &Self, state: &MetricsState| {
-                    // Initial state has last_ok=true with no operations
-                    if state.successful == 0 && state.failed == 0 {
-                        state.last_ok
-                    } else {
-                        // After at least one operation, last_ok should be valid
-                        true // The model maintains this invariant by construction
-                    }
-                }),
+                Property::always(
+                    "last_ok_reflects_last_action",
+                    |_: &Self, state: &MetricsState| {
+                        // Initial state has last_ok=true with no operations
+                        if state.successful == 0 && state.failed == 0 {
+                            state.last_ok
+                        } else {
+                            // After at least one operation, last_ok should be valid
+                            true // The model maintains this invariant by construction
+                        }
+                    },
+                ),
                 // Eventually property: system can always make progress
                 Property::sometimes("can_record_success", |_: &Self, state: &MetricsState| {
                     state.successful > 0
@@ -636,9 +645,6 @@ mod state_machine {
         let checker = model.checker().threads(1).spawn_bfs().join();
 
         // Should have explored multiple states
-        assert!(
-            checker.state_count() > 1,
-            "Should explore multiple states"
-        );
+        assert!(checker.state_count() > 1, "Should explore multiple states");
     }
 }

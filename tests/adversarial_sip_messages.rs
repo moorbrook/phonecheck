@@ -26,8 +26,8 @@ use std::net::SocketAddr;
 
 // Import the module under test - NO shared helpers allowed
 use phonecheck::sip::messages::{
-    build_ack, build_bye, build_invite, build_invite_with_auth, extract_to_tag,
-    extract_via_branch, generate_branch, generate_call_id, generate_tag, parse_status_code,
+    build_ack, build_bye, build_invite, build_invite_with_auth, extract_to_tag, extract_via_branch,
+    generate_branch, generate_call_id, generate_tag, parse_status_code,
 };
 
 // ============================================================================
@@ -70,9 +70,9 @@ fn unicode_position_breaker() -> impl Strategy<Value = String> {
         // Greek sigma (ς vs σ context-dependent)
         Just("To: Σ;tag=ΣIGMA".to_string()),
         // Combining characters
-        Just("To: e\u{0301};tag=café".to_string()),  // é as e + combining accent
+        Just("To: e\u{0301};tag=café".to_string()), // é as e + combining accent
         // Zero-width characters
-        Just("To: \u{200B};tag=hidden".to_string()),  // zero-width space
+        Just("To: \u{200B};tag=hidden".to_string()), // zero-width space
         Just("To: a\u{200D}b;tag=joined".to_string()), // zero-width joiner
         // Right-to-left override
         Just("To: \u{202E}evil;tag=reversed".to_string()),
@@ -113,7 +113,7 @@ fn malformed_status_line() -> impl Strategy<Value = String> {
         Just("SIP/2.0\t200\tOK".to_string()),
         Just("  SIP/2.0 200 OK".to_string()),
         // Unicode in status code position
-        Just("SIP/2.0 ２００ OK".to_string()),  // fullwidth digits
+        Just("SIP/2.0 ２００ OK".to_string()), // fullwidth digits
     ]
 }
 
@@ -127,7 +127,10 @@ fn malformed_via_header() -> impl Strategy<Value = String> {
         // Branch with injection
         Just("Via: SIP/2.0/UDP 1.1.1.1;branch=z9hG4bK\r\nEvil: header".to_string()),
         // Multiple Via headers
-        Just("Via: SIP/2.0/UDP 1.1.1.1;branch=first\r\nVia: SIP/2.0/UDP 2.2.2.2;branch=second".to_string()),
+        Just(
+            "Via: SIP/2.0/UDP 1.1.1.1;branch=first\r\nVia: SIP/2.0/UDP 2.2.2.2;branch=second"
+                .to_string()
+        ),
         // Case variations
         Just("VIA: SIP/2.0/UDP 1.1.1.1;BRANCH=z9hG4bKtest".to_string()),
         Just("via: sip/2.0/udp 1.1.1.1;branch=z9hG4bKtest".to_string()),
@@ -169,7 +172,7 @@ fn malformed_to_header() -> impl Strategy<Value = String> {
 fn arbitrary_utf8() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("".to_string()),
-        ".*",  // any valid UTF-8
+        ".*", // any valid UTF-8
         // Specific problematic patterns
         Just("\r\n\r\n".to_string()),
         Just("\x00".repeat(100)),
@@ -354,7 +357,10 @@ fn test_to_tag_rejects_missing_tag() {
 
 #[test]
 fn test_via_branch_rejects_missing_branch() {
-    assert_eq!(extract_via_branch("Via: SIP/2.0/UDP 1.1.1.1:5060;rport"), None);
+    assert_eq!(
+        extract_via_branch("Via: SIP/2.0/UDP 1.1.1.1:5060;rport"),
+        None
+    );
     assert_eq!(extract_via_branch("Via: SIP/2.0/UDP 1.1.1.1:5060"), None);
 }
 
@@ -481,7 +487,10 @@ fn test_parse_status_extremely_long_input() {
 #[test]
 fn test_parse_status_many_lines() {
     // Thousands of lines
-    let many_lines = (0..10000).map(|i| format!("Header{}: value{}", i, i)).collect::<Vec<_>>().join("\r\n");
+    let many_lines = (0..10000)
+        .map(|i| format!("Header{}: value{}", i, i))
+        .collect::<Vec<_>>()
+        .join("\r\n");
     let input = format!("SIP/2.0 200 OK\r\n{}", many_lines);
     let result = parse_status_code(&input);
     assert_eq!(result, Some(200));

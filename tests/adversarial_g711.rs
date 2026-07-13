@@ -25,6 +25,11 @@
 //! - Batch decode == single decode for all inputs
 //! - Payload type 0 = ulaw, 8 = alaw, all others = None
 
+// The i16 range assertions below are tautological by type (the lint is right),
+// but they document the intended property; clippy denies
+// absurd_extreme_comparisons by default, which broke `cargo clippy --all-targets`.
+#![allow(clippy::absurd_extreme_comparisons, clippy::manual_range_contains)]
+
 use proptest::prelude::*;
 
 use phonecheck::rtp::g711::{G711Codec, G711Decoder};
@@ -183,7 +188,8 @@ fn test_ulaw_symmetry_exhaustive() {
         // Skip if either is zero (zero has no sign)
         if neg != 0 && pos != 0 {
             assert_eq!(
-                neg, -pos,
+                neg,
+                -pos,
                 "u-law symmetry violation: byte {} -> {}, byte {} -> {}",
                 i,
                 neg,
@@ -203,7 +209,8 @@ fn test_alaw_symmetry_exhaustive() {
         let pos = decoder.decode_sample(i + 128);
 
         assert_eq!(
-            neg, -pos,
+            neg,
+            -pos,
             "A-law symmetry violation: byte {} -> {}, byte {} -> {}",
             i,
             neg,
@@ -234,7 +241,10 @@ fn test_f32_normalization_boundaries() {
     }
 
     // Specific boundary checks
-    assert!(normalized[0] >= -1.0, "i16::MIN should normalize to >= -1.0");
+    assert!(
+        normalized[0] >= -1.0,
+        "i16::MIN should normalize to >= -1.0"
+    );
     assert_eq!(normalized[3], 0.0, "0 should normalize to 0.0");
     assert!(normalized[6] < 1.0, "i16::MAX should normalize to < 1.0");
 }
@@ -253,9 +263,21 @@ fn test_f32_preserves_sign() {
 
     for (i, (&orig, &norm)) in samples.iter().zip(normalized.iter()).enumerate() {
         if orig < 0 {
-            assert!(norm < 0.0, "Negative sample {} at index {} became non-negative {}", orig, i, norm);
+            assert!(
+                norm < 0.0,
+                "Negative sample {} at index {} became non-negative {}",
+                orig,
+                i,
+                norm
+            );
         } else if orig > 0 {
-            assert!(norm > 0.0, "Positive sample {} at index {} became non-positive {}", orig, i, norm);
+            assert!(
+                norm > 0.0,
+                "Positive sample {} at index {} became non-positive {}",
+                orig,
+                i,
+                norm
+            );
         } else {
             assert_eq!(norm, 0.0, "Zero sample must remain zero");
         }
@@ -308,8 +330,14 @@ proptest! {
 #[test]
 fn test_payload_type_only_valid_types() {
     // Valid types
-    assert!(G711Decoder::from_payload_type(0).is_some(), "PT 0 must be valid");
-    assert!(G711Decoder::from_payload_type(8).is_some(), "PT 8 must be valid");
+    assert!(
+        G711Decoder::from_payload_type(0).is_some(),
+        "PT 0 must be valid"
+    );
+    assert!(
+        G711Decoder::from_payload_type(8).is_some(),
+        "PT 8 must be valid"
+    );
 
     // All other types must be rejected
     for pt in (1..=7).chain(9..=255) {
@@ -366,7 +394,11 @@ fn test_decode_large_input() {
     let large_input: Vec<u8> = (0u8..=255u8).cycle().take(1_000_000).collect();
     let result = decoder.decode(&large_input);
 
-    assert_eq!(result.len(), 1_000_000, "Output length must match input length");
+    assert_eq!(
+        result.len(),
+        1_000_000,
+        "Output length must match input length"
+    );
 }
 
 #[test]
@@ -399,12 +431,7 @@ fn test_f32_conversion_large() {
 
     // All values must be in range
     for (i, &f) in result.iter().enumerate() {
-        assert!(
-            f >= -1.0 && f <= 1.0,
-            "Index {} out of range: {}",
-            i,
-            f
-        );
+        assert!(f >= -1.0 && f <= 1.0, "Index {} out of range: {}", i, f);
     }
 }
 
@@ -448,8 +475,16 @@ fn test_ulaw_max_amplitude() {
     let max_neg = decoder.decode_sample(0x00);
     let max_pos = decoder.decode_sample(0x80);
 
-    assert!(max_neg < -30000, "u-law max negative should be < -30000, got {}", max_neg);
-    assert!(max_pos > 30000, "u-law max positive should be > 30000, got {}", max_pos);
+    assert!(
+        max_neg < -30000,
+        "u-law max negative should be < -30000, got {}",
+        max_neg
+    );
+    assert!(
+        max_pos > 30000,
+        "u-law max positive should be > 30000, got {}",
+        max_pos
+    );
     assert_eq!(max_neg, -max_pos, "u-law max values must be symmetric");
 }
 
@@ -460,8 +495,16 @@ fn test_alaw_max_amplitude() {
     let max_neg = decoder.decode_sample(0x2A); // Encoded max negative
     let max_pos = decoder.decode_sample(0xAA); // Encoded max positive
 
-    assert!(max_neg < -30000, "A-law max negative should be < -30000, got {}", max_neg);
-    assert!(max_pos > 30000, "A-law max positive should be > 30000, got {}", max_pos);
+    assert!(
+        max_neg < -30000,
+        "A-law max negative should be < -30000, got {}",
+        max_neg
+    );
+    assert!(
+        max_pos > 30000,
+        "A-law max positive should be > 30000, got {}",
+        max_pos
+    );
 }
 
 // ============================================================================

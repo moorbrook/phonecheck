@@ -38,11 +38,14 @@ async fn main() -> Result<()> {
     // Load .env file if present
     let _ = dotenvy::dotenv();
 
-    // Initialize logging
+    // Initialize logging.
+    // Use RUST_LOG when set; only fall back to phonecheck=info otherwise.
+    // (Unconditionally appending a phonecheck=info directive would override
+    // any RUST_LOG setting for this crate, making RUST_LOG=debug a no-op.)
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("phonecheck=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("phonecheck=info")),
         )
         .init();
 
@@ -51,7 +54,10 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = Config::from_env()?;
     info!("Configuration loaded");
-    info!("  Target phone: {}", redact::phone_number(&config.target_phone));
+    info!(
+        "  Target phone: {}",
+        redact::phone_number(&config.target_phone)
+    );
     info!("  SIP server: {}:{}", config.sip_server, config.sip_port);
     info!("  Expected phrase: \"{}\"", config.expected_phrase);
     info!("  Listen duration: {}s", config.listen_duration_secs);
@@ -100,7 +106,15 @@ async fn main() -> Result<()> {
     if args.once {
         info!("Running single check (--once mode)");
         let cancel_token = CancellationToken::new();
-        orchestrator::run_check(&config, recognizer.as_ref(), &notifier, &health_metrics, cancel_token, args.save_audio.as_deref()).await;
+        orchestrator::run_check(
+            &config,
+            recognizer.as_ref(),
+            &notifier,
+            &health_metrics,
+            cancel_token,
+            args.save_audio.as_deref(),
+        )
+        .await;
         health_cancel.cancel();
         return Ok(());
     }
@@ -112,7 +126,15 @@ async fn main() -> Result<()> {
         let notifier = notifier.clone();
         let health_metrics = health_metrics.clone();
         async move {
-            orchestrator::run_check(&config, recognizer.as_ref(), &notifier, &health_metrics, cancel_token, None).await;
+            orchestrator::run_check(
+                &config,
+                recognizer.as_ref(),
+                &notifier,
+                &health_metrics,
+                cancel_token,
+                None,
+            )
+            .await;
         }
     })
     .await;

@@ -46,7 +46,9 @@ pub fn print_help() {
     println!("OPTIONS:");
     println!("    --once                  Run a single check and exit");
     println!("    --validate              Validate configuration and exit");
-    println!("    --save-audio [PATH]     Save captured audio to WAV file (default: captured_audio.wav)");
+    println!(
+        "    --save-audio [PATH]     Save captured audio to WAV file (default: captured_audio.wav)"
+    );
     println!("    --help, -h              Show this help message\n");
     println!("ENVIRONMENT:");
     println!("    See .env.example for required configuration variables");

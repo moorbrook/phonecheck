@@ -3,7 +3,6 @@
 ///
 /// The jitter buffer collects incoming RTP packets and outputs them in sequence order,
 /// with configurable delay to absorb network jitter.
-
 use std::collections::BTreeMap;
 use tracing::{debug, trace, warn};
 
@@ -90,7 +89,11 @@ impl JitterBuffer {
 
         // Check if packet is too old (already past output window)
         if self.is_before(seq, next_seq) {
-            trace!("Dropping late packet: seq={} (expected >= {})", seq, next_seq);
+            trace!(
+                "Dropping late packet: seq={} (expected >= {})",
+                seq,
+                next_seq
+            );
             self.packets_dropped += 1;
             return false;
         }
@@ -104,7 +107,11 @@ impl JitterBuffer {
 
         // Insert the packet
         self.packets.insert(seq, packet);
-        trace!("Buffered packet: seq={}, buffer_size={}", seq, self.packets.len());
+        trace!(
+            "Buffered packet: seq={}, buffer_size={}",
+            seq,
+            self.packets.len()
+        );
 
         // Trim buffer if too large
         while self.packets.len() > self.config.max_size as usize {
@@ -759,29 +766,29 @@ mod state_machine {
         fn properties(&self) -> Vec<Property<Self>> {
             vec![
                 // Safety: Buffer size never exceeds max_size
-                Property::always("buffer_size_bounded", |model: &Self, state: &BufferState| {
-                    state.buffered.len() <= model.max_size as usize
-                }),
-
+                Property::always(
+                    "buffer_size_bounded",
+                    |model: &Self, state: &BufferState| {
+                        state.buffered.len() <= model.max_size as usize
+                    },
+                ),
                 // Safety: No duplicate sequences in output
                 Property::always("no_duplicate_output", |_: &Self, state: &BufferState| {
                     let mut seen = std::collections::HashSet::new();
                     state.output.iter().all(|&seq| seen.insert(seq))
                 }),
-
                 // Safety: Output is monotonically increasing (no out-of-order output)
                 Property::always("output_ordered", |_: &Self, state: &BufferState| {
                     state.output.windows(2).all(|w| w[0] < w[1])
                 }),
-
                 // Safety: Total packets = buffered + output + dropped
                 Property::always("packet_accounting", |_: &Self, state: &BufferState| {
                     let total_sent = state.next_to_send as usize;
-                    let accounted = state.buffered.len() + state.output.len() + state.dropped as usize;
+                    let accounted =
+                        state.buffered.len() + state.output.len() + state.dropped as usize;
                     // Allow for late/duplicate attempts which increment dropped but not sent
                     accounted >= state.output.len() + state.buffered.len()
                 }),
-
                 // Safety: Output sequences are subset of sent sequences
                 Property::always("output_valid_sequences", |_: &Self, state: &BufferState| {
                     state.output.iter().all(|&seq| seq < state.next_to_send)
@@ -792,7 +799,10 @@ mod state_machine {
 
     #[test]
     fn test_jitter_buffer_model_basic() {
-        let model = JitterBufferModel { max_ops: 5, max_size: 10 };
+        let model = JitterBufferModel {
+            max_ops: 5,
+            max_size: 10,
+        };
         let checker = model.checker().threads(1).spawn_bfs().join();
         println!("States explored: {}", checker.unique_state_count());
         checker.assert_properties();
@@ -801,9 +811,15 @@ mod state_machine {
     #[test]
     fn test_jitter_buffer_model_constrained() {
         // Test with small max_size to stress overflow handling
-        let model = JitterBufferModel { max_ops: 8, max_size: 3 };
+        let model = JitterBufferModel {
+            max_ops: 8,
+            max_size: 3,
+        };
         let checker = model.checker().threads(1).spawn_bfs().join();
-        println!("States explored (constrained): {}", checker.unique_state_count());
+        println!(
+            "States explored (constrained): {}",
+            checker.unique_state_count()
+        );
         checker.assert_properties();
     }
 }
@@ -872,28 +888,19 @@ mod kani_proofs {
     #[kani::proof]
     fn is_before_wraparound_boundary() {
         // 65535 is "before" 0 in RTP sequence space (just wrapped)
-        kani::assert(
-            is_before(65535, 0),
-            "65535 should be before 0 (wraparound)"
-        );
+        kani::assert(is_before(65535, 0), "65535 should be before 0 (wraparound)");
 
         // 0 is "after" 65535
-        kani::assert(
-            !is_before(0, 65535),
-            "0 should not be before 65535"
-        );
+        kani::assert(!is_before(0, 65535), "0 should not be before 65535");
 
         // Test the midpoint: 32768 is the boundary
         // Values < 32768 apart are considered "close"
-        kani::assert(
-            is_before(0, 32767),
-            "0 should be before 32767"
-        );
+        kani::assert(is_before(0, 32767), "0 should be before 32767");
 
         // 32768 apart is ambiguous - we treat it as "not before"
         kani::assert(
             !is_before(0, 32768),
-            "0 should not be before 32768 (boundary)"
+            "0 should not be before 32768 (boundary)",
         );
     }
 
@@ -944,7 +951,7 @@ mod kani_proofs {
         // Buffer size should be at most max_size
         kani::assert(
             buffer.packets.len() <= max_size as usize,
-            "buffer must not exceed max_size"
+            "buffer must not exceed max_size",
         );
     }
 
@@ -990,11 +997,11 @@ mod kani_proofs {
 
         kani::assert(
             drained.len() == count_before,
-            "drain must return all buffered packets"
+            "drain must return all buffered packets",
         );
         kani::assert(
             buffer.packets.is_empty(),
-            "buffer must be empty after drain"
+            "buffer must be empty after drain",
         );
     }
 }

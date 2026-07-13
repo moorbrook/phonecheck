@@ -39,7 +39,10 @@ impl Notifier {
         for attempt in 0..MAX_RETRIES {
             if attempt > 0 {
                 let backoff = Duration::from_secs(1 << attempt);
-                warn!("Pushover attempt {} failed, retrying in {:?}...", attempt, backoff);
+                warn!(
+                    "Pushover attempt {} failed, retrying in {:?}...",
+                    attempt, backoff
+                );
                 sleep(backoff).await;
             }
 
@@ -55,7 +58,10 @@ impl Notifier {
         }
 
         let err = last_error.unwrap();
-        error!("Failed to send Pushover alert after {} attempts: {}", MAX_RETRIES, err);
+        error!(
+            "Failed to send Pushover alert after {} attempts: {}",
+            MAX_RETRIES, err
+        );
         Err(err)
     }
 
@@ -110,6 +116,9 @@ mod tests {
         let json = r#"{"status": 0, "errors": ["user key is invalid"]}"#;
         let response: PushoverResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.status, 0);
-        assert_eq!(response.errors, Some(vec!["user key is invalid".to_string()]));
+        assert_eq!(
+            response.errors,
+            Some(vec!["user key is invalid".to_string()])
+        );
     }
 }

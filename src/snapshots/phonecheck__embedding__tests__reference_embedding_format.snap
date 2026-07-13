@@ -9,7 +9,7 @@ expression: results
     "has_nan: false",
     "has_inf: false",
     "all_zeros: false",
-    "min: -0.157094",
-    "max: 0.140761",
-    "mean: -0.000026145",
+    "min: -0.167430",
+    "max: 0.141711",
+    "mean: -0.000042922",
 ]

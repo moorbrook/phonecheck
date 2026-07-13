@@ -14,7 +14,7 @@ pub fn phone_number(phone: &str) -> String {
     }
 
     let visible = &digits[digits.len() - 4..];
-    format!("{}{}",  "*".repeat(digits.len() - 4), visible)
+    format!("{}{}", "*".repeat(digits.len() - 4), visible)
 }
 
 /// Redact an email address, keeping domain visible.
@@ -227,7 +227,10 @@ mod kani_proofs {
         let input = any_digit_string::<10>();
         let result = phone_number(&input);
         // Should not panic - if we reach here, success
-        kani::assert(result.len() == 10, "output length must equal input digit count");
+        kani::assert(
+            result.len() == 10,
+            "output length must equal input digit count",
+        );
     }
 
     /// Proves: phone_number preserves length for 5-digit input
@@ -261,7 +264,10 @@ mod kani_proofs {
         // Last 4 chars of result should match last 4 chars of input
         let input_last4: String = input.chars().skip(6).collect();
         let result_last4: String = result.chars().skip(6).collect();
-        kani::assert(input_last4 == result_last4, "last 4 digits must be preserved");
+        kani::assert(
+            input_last4 == result_last4,
+            "last 4 digits must be preserved",
+        );
     }
 
     /// Proves: redacted prefix contains only asterisks

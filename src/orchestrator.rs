@@ -27,7 +27,12 @@ pub async fn run_check(
     let call_result = match perform_call(config, cancel_token).await {
         Ok(res) => res,
         Err(e) => {
-            handle_failure(health_metrics, notifier, &format!("PhoneCheck ERROR: {}", e)).await;
+            handle_failure(
+                health_metrics,
+                notifier,
+                &format!("PhoneCheck ERROR: {}", e),
+            )
+            .await;
             return;
         }
     };
@@ -40,10 +45,20 @@ pub async fn run_check(
         save_audio(&call_result.audio_samples, path);
     }
 
-    let check_result = match process_audio(recognizer_mutex, &call_result.audio_samples) {
+    // Whisper transcription + ONNX embedding are CPU-bound and can take seconds.
+    // Run them via block_in_place so the async runtime (health server, shutdown
+    // signal handling) stays responsive instead of stalling a worker thread.
+    let check_result = match run_cpu_bound(|| {
+        process_audio(recognizer_mutex, &call_result.audio_samples)
+    }) {
         Ok(res) => res,
         Err(e) => {
-            handle_failure(health_metrics, notifier, &format!("PhoneCheck ALERT: Speech recognition failed - {}", e)).await;
+            handle_failure(
+                health_metrics,
+                notifier,
+                &format!("PhoneCheck ALERT: Speech recognition failed - {}", e),
+            )
+            .await;
             return;
         }
     };
@@ -54,15 +69,22 @@ pub async fn run_check(
 async fn perform_call(config: &Arc<Config>, cancel_token: CancellationToken) -> Result<CallResult> {
     let sip_client = SipClient::new(Arc::clone(config)).await?;
     let listen_duration = std::time::Duration::from_secs(config.listen_duration_secs);
-    let result = sip_client.make_test_call_cancellable(listen_duration, cancel_token.clone()).await?;
+    let result = sip_client
+        .make_test_call_cancellable(listen_duration, cancel_token.clone())
+        .await?;
 
     // Retry once on timeout/unreachable (transient network issue, stale NAT mapping)
     if !result.connected {
         if let Some(ref err) = result.error {
             if err.contains("timeout") || err.contains("No response") {
-                warn!("First attempt failed ({}), retrying with fresh connection...", err);
+                warn!(
+                    "First attempt failed ({}), retrying with fresh connection...",
+                    err
+                );
                 let sip_client = SipClient::new(Arc::clone(config)).await?;
-                return sip_client.make_test_call_cancellable(listen_duration, cancel_token).await;
+                return sip_client
+                    .make_test_call_cancellable(listen_duration, cancel_token)
+                    .await;
             }
         }
     }
@@ -78,13 +100,23 @@ async fn validate_call_result(
     if !result.connected {
         let error_msg = result.error.as_deref().unwrap_or("Unknown error");
         error!("Call did not connect: {}", error_msg);
-        handle_failure(health_metrics, notifier, &format!("PhoneCheck ALERT: Call did not connect - {}", error_msg)).await;
+        handle_failure(
+            health_metrics,
+            notifier,
+            &format!("PhoneCheck ALERT: Call did not connect - {}", error_msg),
+        )
+        .await;
         return false;
     }
 
     if !result.audio_received {
         warn!("Call connected but no audio received");
-        handle_failure(health_metrics, notifier, "PhoneCheck ALERT: Call connected but no audio received").await;
+        handle_failure(
+            health_metrics,
+            notifier,
+            "PhoneCheck ALERT: Call connected but no audio received",
+        )
+        .await;
         return false;
     }
 
@@ -98,19 +130,31 @@ fn save_audio(samples: &[f32], path: &str) {
     }
 }
 
+/// Run a CPU-bound closure without starving the async runtime.
+///
+/// Uses `block_in_place` on the multi-thread runtime (hands the worker off to
+/// another thread). On a current-thread runtime (e.g. `#[tokio::test]`), where
+/// `block_in_place` would panic, it simply runs the closure inline.
+fn run_cpu_bound<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
 fn process_audio(
     recognizer_mutex: &std::sync::Mutex<SpeechRecognizer>,
     samples: &[f32],
 ) -> Result<CheckResult> {
-    let mut recognizer = recognizer_mutex.lock().map_err(|e| anyhow::anyhow!("Failed to lock recognizer: {}", e))?;
+    let mut recognizer = recognizer_mutex
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Failed to lock recognizer: {}", e))?;
     recognizer.check_audio(samples)
 }
 
-async fn report_result(
-    result: CheckResult,
-    health_metrics: &HealthMetrics,
-    notifier: &Notifier,
-) {
+async fn report_result(result: CheckResult, health_metrics: &HealthMetrics, notifier: &Notifier) {
     info!("Transcribed: \"{}\"", result.transcript);
     if let Some(similarity) = result.similarity {
         info!("Embedding similarity: {:.4}", similarity);
@@ -122,8 +166,7 @@ async fn report_result(
     } else {
         warn!(
             "ALERT: Expected phrase NOT detected. Heard: \"{}\", similarity: {:?}",
-            result.transcript,
-            result.similarity
+            result.transcript, result.similarity
         );
         handle_failure(
             health_metrics,

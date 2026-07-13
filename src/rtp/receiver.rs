@@ -68,7 +68,10 @@ impl RtpReceiver {
     /// external IP:port the server sees when we send from this socket.
     /// This is critical because CGNAT assigns different external ports per
     /// local socket, and STUN to a different server gives a useless mapping.
-    pub async fn discover_cgnat_mapping(&self, sip_server: std::net::SocketAddr) -> Result<std::net::SocketAddr> {
+    pub async fn discover_cgnat_mapping(
+        &self,
+        sip_server: std::net::SocketAddr,
+    ) -> Result<std::net::SocketAddr> {
         use std::time::Duration;
         let local_port = self.socket.local_addr()?.port();
         let branch = format!("z9hG4bK{:016x}", rand::thread_rng().gen::<u64>());
@@ -85,16 +88,22 @@ impl RtpReceiver {
              Max-Forwards: 70\r\n\
              Content-Length: 0\r\n\
              \r\n",
-            sip_server, local_port, branch, tag, sip_server.ip(), call_id
+            sip_server,
+            local_port,
+            branch,
+            tag,
+            sip_server.ip(),
+            call_id
         );
 
         self.socket.send_to(options.as_bytes(), sip_server).await?;
 
         let mut buf = [0u8; 4096];
-        let (len, _) = tokio::time::timeout(Duration::from_secs(5), self.socket.recv_from(&mut buf))
-            .await
-            .map_err(|_| anyhow::anyhow!("CGNAT probe timeout"))?
-            .map_err(|e| anyhow::anyhow!("CGNAT probe recv error: {}", e))?;
+        let (len, _) =
+            tokio::time::timeout(Duration::from_secs(5), self.socket.recv_from(&mut buf))
+                .await
+                .map_err(|_| anyhow::anyhow!("CGNAT probe timeout"))?
+                .map_err(|e| anyhow::anyhow!("CGNAT probe recv error: {}", e))?;
 
         let response = std::str::from_utf8(&buf[..len])
             .map_err(|_| anyhow::anyhow!("CGNAT probe: non-UTF8 response"))?;
@@ -118,8 +127,13 @@ impl RtpReceiver {
 
         match (received_ip, rport) {
             (Some(ip), Some(port)) => Ok(std::net::SocketAddr::new(ip, port)),
-            (Some(ip), None) => Err(anyhow::anyhow!("CGNAT probe: got received={} but no rport", ip)),
-            _ => Err(anyhow::anyhow!("CGNAT probe: no received/rport in Via header")),
+            (Some(ip), None) => Err(anyhow::anyhow!(
+                "CGNAT probe: got received={} but no rport",
+                ip
+            )),
+            _ => Err(anyhow::anyhow!(
+                "CGNAT probe: no received/rport in Via header"
+            )),
         }
     }
 
@@ -165,7 +179,8 @@ impl RtpReceiver {
         cancel_token: CancellationToken,
         keepalive_target: std::net::SocketAddr,
     ) -> Result<bool> {
-        self.receive_for_impl(duration, cancel_token, Some(keepalive_target)).await
+        self.receive_for_impl(duration, cancel_token, Some(keepalive_target))
+            .await
     }
 
     async fn receive_for_impl(
@@ -240,7 +255,11 @@ impl RtpReceiver {
             }
         }
 
-        info!("RTP receive done: {} packets received, {} i16 samples decoded", packet_count, self.samples.len());
+        info!(
+            "RTP receive done: {} packets received, {} i16 samples decoded",
+            packet_count,
+            self.samples.len()
+        );
         self.flush_jitter_buffer();
         Ok(!cancelled)
     }
@@ -307,7 +326,10 @@ impl RtpReceiver {
         let cc = data[0] & 0x0F;
         let has_extension = (data[0] & 0x10) != 0;
         let mut offset = 12 + (cc as usize * 4);
-        if has_extension && data.len() > offset + 4 {
+        // >= (not >): the extension header may end exactly at the packet end
+        // (ext_length == 0, empty payload). With `>` those 4 header bytes were
+        // treated as G.711 payload and decoded as garbage audio samples.
+        if has_extension && data.len() >= offset + 4 {
             let ext_length = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
             offset += 4 + (ext_length * 4);
         }
@@ -327,9 +349,13 @@ impl RtpReceiver {
 
 /// Parse RTP header from raw bytes (public for testing)
 pub fn parse_rtp_header(data: &[u8]) -> Option<(u8, u16, u32, u32, usize)> {
-    if data.len() < 12 { return None; }
+    if data.len() < 12 {
+        return None;
+    }
     let version = (data[0] >> 6) & 0x03;
-    if version != 2 { return None; }
+    if version != 2 {
+        return None;
+    }
 
     let payload_type = data[1] & 0x7F;
     let sequence = u16::from_be_bytes([data[2], data[3]]);
@@ -339,7 +365,9 @@ pub fn parse_rtp_header(data: &[u8]) -> Option<(u8, u16, u32, u32, usize)> {
     let cc = data[0] & 0x0F;
     let has_extension = (data[0] & 0x10) != 0;
     let mut offset = 12 + (cc as usize * 4);
-    if has_extension && data.len() > offset + 4 {
+    // >= (not >): see calculate_payload_offset — extension header may end
+    // exactly at the packet boundary.
+    if has_extension && data.len() >= offset + 4 {
         let ext_length = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
         offset += 4 + (ext_length * 4);
     }
@@ -356,9 +384,44 @@ mod tests {
         let mut receiver = RtpReceiver::bind(0).await.unwrap();
         let cancel_token = CancellationToken::new();
         cancel_token.cancel();
-        let result = receiver.receive_for_cancellable(Duration::from_secs(10), cancel_token).await;
+        let result = receiver
+            .receive_for_cancellable(Duration::from_secs(10), cancel_token)
+            .await;
         assert!(result.is_ok());
         assert!(!result.unwrap());
+    }
+
+    /// Regression test: a packet whose header extension ends exactly at the
+    /// packet boundary (X=1, ext_length=0, no payload) must yield an offset
+    /// past the extension header, not treat the extension header as payload.
+    #[test]
+    fn test_parse_rtp_header_extension_only_packet() {
+        let packet = [
+            0x90, 0x00, // V=2, X=1, CC=0
+            0x00, 0x01, // sequence
+            0x00, 0x00, 0x00, 0x10, // timestamp
+            0x12, 0x34, 0x56, 0x78, // SSRC
+            0xBE, 0xDE, 0x00, 0x00, // extension header, ext_length = 0
+        ];
+        let (_, _, _, _, offset) = parse_rtp_header(&packet).unwrap();
+        assert_eq!(offset, 16, "extension header must not be decoded as audio");
+    }
+
+    /// Same boundary via the receiver's internal path: the decoded sample
+    /// buffer must remain empty for an extension-only packet.
+    #[tokio::test]
+    async fn test_receiver_ignores_extension_only_packet_payload() {
+        let mut receiver = RtpReceiver::bind(0).await.unwrap();
+        let packet = [
+            0x90u8, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x12, 0x34, 0x56, 0x78, 0xBE, 0xDE,
+            0x00, 0x00,
+        ];
+        receiver.process_packet(&packet);
+        receiver.flush_jitter_buffer();
+        assert!(
+            receiver.samples.is_empty(),
+            "extension-only packet must contribute zero audio samples"
+        );
     }
 
     #[test]

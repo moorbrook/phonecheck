@@ -1,6 +1,5 @@
 /// Integration tests for SIP/RTP call flow
 /// Uses a mock SIP server to test the full call lifecycle
-
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -27,7 +26,10 @@ fn validate_sip_request(msg: &str) -> (Option<&str>, Vec<String>) {
 
     // RFC 3261: Version must be SIP/2.0
     if version != "SIP/2.0" {
-        errors.push(format!("Invalid SIP version: expected 'SIP/2.0', got '{}'", version));
+        errors.push(format!(
+            "Invalid SIP version: expected 'SIP/2.0', got '{}'",
+            version
+        ));
     }
 
     // RFC 3261 Section 8.1.1: Required headers for all requests
@@ -155,14 +157,17 @@ impl MockSipServer {
                             // Parse Call-ID
                             for line in msg.lines() {
                                 if line.to_lowercase().starts_with("call-id:") {
-                                    call_id = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                                    call_id =
+                                        line.split(':').nth(1).unwrap_or("").trim().to_string();
                                 }
-                                if line.to_lowercase().starts_with("from:") && line.contains("tag=") {
+                                if line.to_lowercase().starts_with("from:") && line.contains("tag=")
+                                {
                                     if let Some(tag_start) = line.find("tag=") {
                                         let tag_end = line[tag_start + 4..]
                                             .find(|c: char| c == ';' || c == '>' || c == '\r')
                                             .unwrap_or(line.len() - tag_start - 4);
-                                        from_tag = line[tag_start + 4..tag_start + 4 + tag_end].to_string();
+                                        from_tag = line[tag_start + 4..tag_start + 4 + tag_end]
+                                            .to_string();
                                     }
                                 }
                                 if line.to_lowercase().starts_with("cseq:") {
@@ -175,7 +180,8 @@ impl MockSipServer {
                                     if let Some(port_str) = line.split_whitespace().nth(1) {
                                         if let Ok(port) = port_str.parse::<u16>() {
                                             // Client is on same host as SIP
-                                            client_rtp_addr = Some(SocketAddr::new(addr.ip(), port));
+                                            client_rtp_addr =
+                                                Some(SocketAddr::new(addr.ip(), port));
                                         }
                                     }
                                 }
@@ -317,15 +323,15 @@ impl MockSipServer {
             // Build RTP packet
             // RTP header: V=2, P=0, X=0, CC=0, M=0, PT=0 (PCMU)
             let mut packet = vec![
-                0x80,                           // V=2, P=0, X=0, CC=0
-                0x00,                           // M=0, PT=0 (PCMU)
-                (sequence >> 8) as u8,          // Sequence high byte
-                (sequence & 0xFF) as u8,        // Sequence low byte
-                (timestamp >> 24) as u8,        // Timestamp
+                0x80,                    // V=2, P=0, X=0, CC=0
+                0x00,                    // M=0, PT=0 (PCMU)
+                (sequence >> 8) as u8,   // Sequence high byte
+                (sequence & 0xFF) as u8, // Sequence low byte
+                (timestamp >> 24) as u8, // Timestamp
                 (timestamp >> 16) as u8,
                 (timestamp >> 8) as u8,
                 timestamp as u8,
-                (ssrc >> 24) as u8,             // SSRC
+                (ssrc >> 24) as u8, // SSRC
                 (ssrc >> 16) as u8,
                 (ssrc >> 8) as u8,
                 ssrc as u8,
@@ -359,7 +365,9 @@ fn test_mock_sip_server_lifecycle() {
 
     // Simulate a simple INVITE
     let client = UdpSocket::bind("127.0.0.1:0").unwrap();
-    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
 
     // Build SDP body first to calculate Content-Length
     let sdp_body = "v=0\r\n\
@@ -445,7 +453,10 @@ fn test_mock_sip_server_lifecycle() {
     // Verify call lifecycle
     assert!(server.invite_received(), "INVITE should have been received");
     assert!(server.bye_received(), "BYE should have been received");
-    assert!(server.rtp_packets_sent() > 0, "Should have sent RTP packets");
+    assert!(
+        server.rtp_packets_sent() > 0,
+        "Should have sent RTP packets"
+    );
 }
 
 #[test]
@@ -544,9 +555,9 @@ impl MockAuthSipServer {
                             let count = self.invite_count.fetch_add(1, Ordering::SeqCst);
 
                             // Check if Authorization header is present
-                            let has_auth = msg.lines().any(|l| {
-                                l.to_lowercase().starts_with("authorization:")
-                            });
+                            let has_auth = msg
+                                .lines()
+                                .any(|l| l.to_lowercase().starts_with("authorization:"));
 
                             if has_auth {
                                 self.auth_received.store(true, Ordering::SeqCst);
@@ -591,7 +602,9 @@ fn test_mock_server_auth_challenge() {
 
     // Create client socket
     let client = UdpSocket::bind("127.0.0.1:0").unwrap();
-    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
 
     // Send INVITE without auth
     let invite1 = "INVITE sip:target@test SIP/2.0\r\n\
@@ -642,7 +655,10 @@ fn test_mock_server_auth_challenge() {
     // Verify server state
     let server = handle.join().expect("Server thread panicked");
     assert_eq!(server.invite_count(), 2, "Should have received 2 INVITEs");
-    assert!(server.auth_received(), "Should have received Authorization header");
+    assert!(
+        server.auth_received(),
+        "Should have received Authorization header"
+    );
 }
 
 // === SIP Validation Tests ===
@@ -659,7 +675,11 @@ fn test_validate_sip_request_valid() {
 
     let (method, errors) = validate_sip_request(valid_invite);
     assert_eq!(method, Some("INVITE"));
-    assert!(errors.is_empty(), "Valid request should have no errors: {:?}", errors);
+    assert!(
+        errors.is_empty(),
+        "Valid request should have no errors: {:?}",
+        errors
+    );
 }
 
 #[test]
@@ -671,7 +691,10 @@ fn test_validate_sip_request_missing_via() {
                        CSeq: 1 INVITE\r\n\r\n";
 
     let (_, errors) = validate_sip_request(missing_via);
-    assert!(errors.iter().any(|e| e.contains("Via")), "Should report missing Via");
+    assert!(
+        errors.iter().any(|e| e.contains("Via")),
+        "Should report missing Via"
+    );
 }
 
 #[test]
@@ -683,7 +706,10 @@ fn test_validate_sip_request_missing_call_id() {
                            CSeq: 1 INVITE\r\n\r\n";
 
     let (_, errors) = validate_sip_request(missing_call_id);
-    assert!(errors.iter().any(|e| e.contains("Call-ID")), "Should report missing Call-ID");
+    assert!(
+        errors.iter().any(|e| e.contains("Call-ID")),
+        "Should report missing Call-ID"
+    );
 }
 
 #[test]
@@ -697,8 +723,11 @@ fn test_validate_sip_request_cseq_method_mismatch() {
 
     let (method, errors) = validate_sip_request(mismatch);
     assert_eq!(method, Some("INVITE"));
-    assert!(errors.iter().any(|e| e.contains("doesn't match")),
-            "Should report CSeq method mismatch: {:?}", errors);
+    assert!(
+        errors.iter().any(|e| e.contains("doesn't match")),
+        "Should report CSeq method mismatch: {:?}",
+        errors
+    );
 }
 
 #[test]
@@ -711,5 +740,8 @@ fn test_validate_sip_request_wrong_version() {
                          CSeq: 1 INVITE\r\n\r\n";
 
     let (_, errors) = validate_sip_request(wrong_version);
-    assert!(errors.iter().any(|e| e.contains("SIP version")), "Should report wrong version");
+    assert!(
+        errors.iter().any(|e| e.contains("SIP version")),
+        "Should report wrong version"
+    );
 }

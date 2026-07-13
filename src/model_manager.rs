@@ -180,10 +180,16 @@ impl ModelManager {
                     .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect();
                 if floats.len() == 768 {
-                    info!("Loaded cached reference embedding ({} dimensions)", floats.len());
+                    info!(
+                        "Loaded cached reference embedding ({} dimensions)",
+                        floats.len()
+                    );
                     Some(floats)
                 } else {
-                    warn!("Reference embedding has wrong dimension: {} (expected 768)", floats.len());
+                    warn!(
+                        "Reference embedding has wrong dimension: {} (expected 768)",
+                        floats.len()
+                    );
                     None
                 }
             }
@@ -196,10 +202,7 @@ impl ModelManager {
 
     /// Save reference embedding to disk
     pub fn save_reference_embedding(embedding: &[f32]) -> Result<()> {
-        let bytes: Vec<u8> = embedding
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
         std::fs::write(REFERENCE_EMBEDDING_PATH, bytes)?;
         info!("Saved reference embedding to {}", REFERENCE_EMBEDDING_PATH);
         Ok(())
@@ -209,7 +212,10 @@ impl ModelManager {
 impl Drop for ModelManager {
     fn drop(&mut self) {
         info!("Releasing ModelManager resources");
-        debug!("Dropping WhisperContext (model: {})", self.whisper_model_path);
+        debug!(
+            "Dropping WhisperContext (model: {})",
+            self.whisper_model_path
+        );
         debug!(
             "Dropping AudioEmbedder: {}",
             if self.embedder.is_some() {

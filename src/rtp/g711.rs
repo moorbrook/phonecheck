@@ -288,6 +288,11 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
+    // The range assertions below are tautological for i16 (the lookup tables
+    // guarantee this by type) — clippy denies absurd_extreme_comparisons by
+    // default, which made `cargo clippy --all-targets` fail. Keep the
+    // assertions as documentation of the property, silence the lint.
+    #![allow(clippy::absurd_extreme_comparisons, clippy::manual_range_contains)]
     use super::*;
     use proptest::prelude::*;
 
@@ -389,10 +394,16 @@ mod kani_proofs {
 
         if pt == 0 {
             kani::assert(result.is_some(), "PT 0 must be valid");
-            kani::assert(result.unwrap().codec == G711Codec::ULaw, "PT 0 must be ULaw");
+            kani::assert(
+                result.unwrap().codec == G711Codec::ULaw,
+                "PT 0 must be ULaw",
+            );
         } else if pt == 8 {
             kani::assert(result.is_some(), "PT 8 must be valid");
-            kani::assert(result.unwrap().codec == G711Codec::ALaw, "PT 8 must be ALaw");
+            kani::assert(
+                result.unwrap().codec == G711Codec::ALaw,
+                "PT 8 must be ALaw",
+            );
         } else {
             kani::assert(result.is_none(), "Other PTs must be invalid");
         }

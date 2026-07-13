@@ -47,20 +47,32 @@ fn malformed_rtp_packet() -> impl Strategy<Value = Vec<u8>> {
         Just(vec![0x80, 0x00]),
         Just(vec![0x80, 0x00, 0x00, 0x01]),
         Just(vec![0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10]),
-        Just(vec![0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00]), // 11 bytes
+        Just(vec![
+            0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00
+        ]), // 11 bytes
         // Wrong version (0, 1, 3)
-        Just(vec![0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01]),
-        Just(vec![0x40, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01]),
-        Just(vec![0xC0, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01]),
+        Just(vec![
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01
+        ]),
+        Just(vec![
+            0x40, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01
+        ]),
+        Just(vec![
+            0xC0, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01
+        ]),
         // Max CSRC count (15) but no CSRC data
-        Just(vec![0x8F, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01]),
+        Just(vec![
+            0x8F, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01
+        ]),
         // Extension bit set but no extension data
-        Just(vec![0x90, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01]),
+        Just(vec![
+            0x90, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01
+        ]),
         // Extension with bogus length (claims 65535 32-bit words)
         Just(vec![
             0x90, 0x00, // V=2, X=1
-            0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01,
-            0xBE, 0xDE, // Extension header ID
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01, 0xBE,
+            0xDE, // Extension header ID
             0xFF, 0xFF, // Extension length = 65535 words = 262140 bytes
         ]),
         // All bits set
@@ -72,16 +84,14 @@ fn malformed_rtp_packet() -> impl Strategy<Value = Vec<u8>> {
 
 /// Generate valid RTP packet structure
 fn valid_rtp_packet(payload_size: usize) -> impl Strategy<Value = Vec<u8>> {
-    (0u8..128u8, any::<u16>(), any::<u32>(), any::<u32>()).prop_map(
-        move |(pt, seq, ts, ssrc)| {
-            let mut packet = vec![0x80, pt]; // V=2, PT
-            packet.extend_from_slice(&seq.to_be_bytes());
-            packet.extend_from_slice(&ts.to_be_bytes());
-            packet.extend_from_slice(&ssrc.to_be_bytes());
-            packet.extend(vec![0u8; payload_size]);
-            packet
-        },
-    )
+    (0u8..128u8, any::<u16>(), any::<u32>(), any::<u32>()).prop_map(move |(pt, seq, ts, ssrc)| {
+        let mut packet = vec![0x80, pt]; // V=2, PT
+        packet.extend_from_slice(&seq.to_be_bytes());
+        packet.extend_from_slice(&ts.to_be_bytes());
+        packet.extend_from_slice(&ssrc.to_be_bytes());
+        packet.extend(vec![0u8; payload_size]);
+        packet
+    })
 }
 
 /// Generate sequence numbers that test wraparound
@@ -134,7 +144,9 @@ proptest! {
 
 #[test]
 fn test_rejects_all_non_v2_versions() {
-    let base_packet = [0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01];
+    let base_packet = [
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01,
+    ];
 
     for version in [0u8, 1, 3] {
         let mut packet = base_packet;
@@ -149,7 +161,9 @@ fn test_rejects_all_non_v2_versions() {
 
 #[test]
 fn test_accepts_v2() {
-    let packet = [0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01];
+    let packet = [
+        0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01,
+    ];
     assert!(parse_rtp_header(&packet).is_some());
 }
 
@@ -160,19 +174,26 @@ fn test_accepts_v2() {
 #[test]
 fn test_csrc_offset_calculation() {
     // CC=0 -> offset=12
-    let packet = [0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01];
+    let packet = [
+        0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01,
+    ];
     let (_, _, _, _, offset) = parse_rtp_header(&packet).unwrap();
     assert_eq!(offset, 12);
 
     // CC=1 -> offset=16
-    let mut packet = [0x81, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02];
+    let mut packet = [
+        0x81, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x02,
+    ];
     let (_, _, _, _, offset) = parse_rtp_header(&packet).unwrap();
     assert_eq!(offset, 16);
 
     // CC=15 (max) -> offset=72
     packet[0] = 0x8F;
     // Need a larger packet for this
-    let mut big_packet = vec![0x8F, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01];
+    let mut big_packet = vec![
+        0x8F, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01,
+    ];
     big_packet.extend(vec![0u8; 60]); // 15 CSRCs * 4 bytes
     let (_, _, _, _, offset) = parse_rtp_header(&big_packet).unwrap();
     assert_eq!(offset, 12 + 15 * 4); // 72
@@ -183,8 +204,8 @@ fn test_extension_offset_calculation() {
     // Extension with length=1 (4 bytes of extension data)
     let packet = [
         0x90, 0x00, // V=2, X=1, CC=0
-        0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01,
-        0xBE, 0xDE, // Extension ID
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01, 0xBE,
+        0xDE, // Extension ID
         0x00, 0x01, // Extension length = 1 (4 bytes)
         0x00, 0x00, 0x00, 0x00, // Extension data
         0xAA, // Payload
@@ -211,7 +232,12 @@ fn test_extension_length_overflow_safe() {
     let (_, _, _, _, offset) = result.unwrap();
     // Offset will be calculated as: 12 + 4 + 65535*4 = 262160
     // This is fine - the caller must check if offset < packet.len()
-    assert!(offset > packet.len(), "Offset {} should be > packet len {}", offset, packet.len());
+    assert!(
+        offset > packet.len(),
+        "Offset {} should be > packet len {}",
+        offset,
+        packet.len()
+    );
 }
 
 // ============================================================================
@@ -390,7 +416,11 @@ fn test_jitter_buffer_drops_oldest_on_overflow() {
 
     // Should not contain 0-4 (they were dropped)
     for seq in 0..5u16 {
-        assert!(!sequences.contains(&seq), "Packet {} should have been dropped", seq);
+        assert!(
+            !sequences.contains(&seq),
+            "Packet {} should have been dropped",
+            seq
+        );
     }
 }
 
@@ -442,7 +472,10 @@ fn test_jitter_buffer_late_packet_after_wraparound() {
     // Now insert a "late" packet from before wraparound (65535)
     // This should be rejected as late
     let accepted = buffer.insert(make_packet(65535));
-    assert!(!accepted, "Late packet 65535 should be rejected after 0,1 output");
+    assert!(
+        !accepted,
+        "Late packet 65535 should be rejected after 0,1 output"
+    );
 }
 
 // ============================================================================
@@ -583,15 +616,15 @@ fn test_resample_oracle_known_values() {
     // Ramp: [0.0, 0.25, 0.5, 0.75, 1.0]
     let output = resample_8k_to_16k(&[0.0, 0.25, 0.5, 0.75, 1.0]);
     assert_eq!(output[0], 0.0);
-    assert_eq!(output[1], 0.125);  // (0.0 + 0.25) / 2
+    assert_eq!(output[1], 0.125); // (0.0 + 0.25) / 2
     assert_eq!(output[2], 0.25);
-    assert_eq!(output[3], 0.375);  // (0.25 + 0.5) / 2
+    assert_eq!(output[3], 0.375); // (0.25 + 0.5) / 2
     assert_eq!(output[4], 0.5);
-    assert_eq!(output[5], 0.625);  // (0.5 + 0.75) / 2
+    assert_eq!(output[5], 0.625); // (0.5 + 0.75) / 2
     assert_eq!(output[6], 0.75);
-    assert_eq!(output[7], 0.875);  // (0.75 + 1.0) / 2
+    assert_eq!(output[7], 0.875); // (0.75 + 1.0) / 2
     assert_eq!(output[8], 1.0);
-    assert_eq!(output[9], 1.0);    // last duplicated
+    assert_eq!(output[9], 1.0); // last duplicated
 }
 
 #[test]
@@ -719,14 +752,18 @@ proptest! {
 
 #[test]
 fn test_parse_exactly_12_bytes() {
-    let packet = [0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01];
+    let packet = [
+        0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01,
+    ];
     let result = parse_rtp_header(&packet);
     assert!(result.is_some());
 }
 
 #[test]
 fn test_parse_11_bytes_rejected() {
-    let packet = [0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00];
+    let packet = [
+        0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+    ];
     assert!(parse_rtp_header(&packet).is_none());
 }
 

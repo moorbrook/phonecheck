@@ -5,7 +5,6 @@
 ///
 /// Both Whisper and Wav2Vec2 models are loaded via the singleton ModelManager
 /// to ensure they are only loaded once per process and properly cleaned up.
-
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
@@ -61,9 +60,7 @@ impl SpeechRecognizer {
             .and_then(|m: ModelManagerMutex| m.lock().ok())
             .context("Failed to access ModelManager")?;
 
-        let model_manager = guard
-            .as_ref()
-            .context("ModelManager not initialized")?;
+        let model_manager = guard.as_ref().context("ModelManager not initialized")?;
 
         model_manager.transcribe(audio_samples)
     }
@@ -74,9 +71,7 @@ impl SpeechRecognizer {
             .and_then(|m: ModelManagerMutex| m.lock().ok())
             .context("Failed to access ModelManager")?;
 
-        let model_manager = guard
-            .as_ref()
-            .context("ModelManager not initialized")?;
+        let model_manager = guard.as_ref().context("ModelManager not initialized")?;
 
         Ok(model_manager.has_embedder())
     }
@@ -87,9 +82,7 @@ impl SpeechRecognizer {
             .and_then(|m: ModelManagerMutex| m.lock().ok())
             .context("Failed to access ModelManager for embedding")?;
 
-        let model_manager = guard
-            .as_mut()
-            .context("ModelManager not initialized")?;
+        let model_manager = guard.as_mut().context("ModelManager not initialized")?;
 
         model_manager.embed(audio_samples)
     }
@@ -131,10 +124,7 @@ impl SpeechRecognizer {
     }
 
     /// Check audio similarity using Wav2Vec2 embeddings
-    fn check_embedding_similarity(
-        &mut self,
-        audio_samples: &[f32],
-    ) -> Result<(bool, Option<f32>)> {
+    fn check_embedding_similarity(&mut self, audio_samples: &[f32]) -> Result<(bool, Option<f32>)> {
         // Compute embedding for current audio
         let current_embedding = self.compute_embedding(audio_samples)?;
 
@@ -175,7 +165,10 @@ impl SpeechRecognizer {
             .context("No reference embedding file found")?;
 
         self.reference_embedding = Some(new_ref);
-        info!("Reloaded reference embedding from {}", REFERENCE_EMBEDDING_PATH);
+        info!(
+            "Reloaded reference embedding from {}",
+            REFERENCE_EMBEDDING_PATH
+        );
         Ok(())
     }
 }

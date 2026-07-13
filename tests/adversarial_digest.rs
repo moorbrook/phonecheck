@@ -224,15 +224,7 @@ fn test_parse_rejects_empty_string() {
 #[test]
 fn test_parse_rejects_unsupported_algorithms() {
     let unsupported = [
-        "SHA256",
-        "SHA-256",
-        "SHA1",
-        "SHA-1",
-        "MD4",
-        "NONE",
-        "null",
-        "",
-        "UNKNOWN",
+        "SHA256", "SHA-256", "SHA1", "SHA-1", "MD4", "NONE", "null", "", "UNKNOWN",
     ];
 
     for alg in unsupported {
@@ -259,7 +251,8 @@ fn test_parse_accepts_supported_algorithms() {
     assert_eq!(md5_explicit.unwrap().algorithm, DigestAlgorithm::Md5);
 
     // MD5-sess
-    let md5_sess = DigestChallenge::parse(r#"Digest realm="test", nonce="123", algorithm=MD5-sess"#);
+    let md5_sess =
+        DigestChallenge::parse(r#"Digest realm="test", nonce="123", algorithm=MD5-sess"#);
     assert!(md5_sess.is_some());
     assert_eq!(md5_sess.unwrap().algorithm, DigestAlgorithm::Md5Sess);
 
@@ -421,11 +414,11 @@ fn test_parse_multiple_commas() {
 #[test]
 fn test_parse_whitespace_variations() {
     let variants = [
-        r#"Digest realm="test",nonce="123""#,          // No space after comma
-        r#"Digest  realm="test",  nonce="123""#,       // Extra spaces
-        r#"Digest realm = "test" , nonce = "123""#,    // Spaces around equals
-        "Digest realm=\"test\",\tnonce=\"123\"",       // Tab separator
-        "Digest realm=\"test\",\n nonce=\"123\"",      // Newline (shouldn't work)
+        r#"Digest realm="test",nonce="123""#,    // No space after comma
+        r#"Digest  realm="test",  nonce="123""#, // Extra spaces
+        r#"Digest realm = "test" , nonce = "123""#, // Spaces around equals
+        "Digest realm=\"test\",\tnonce=\"123\"", // Tab separator
+        "Digest realm=\"test\",\n nonce=\"123\"", // Newline (shouldn't work)
     ];
 
     for variant in variants {
@@ -510,8 +503,10 @@ fn test_response_deterministic_without_qop() {
         stale: false,
     };
 
-    let response1 = DigestResponse::compute(&challenge, "user", "pass", "INVITE", "sip:test@example.com");
-    let response2 = DigestResponse::compute(&challenge, "user", "pass", "INVITE", "sip:test@example.com");
+    let response1 =
+        DigestResponse::compute(&challenge, "user", "pass", "INVITE", "sip:test@example.com");
+    let response2 =
+        DigestResponse::compute(&challenge, "user", "pass", "INVITE", "sip:test@example.com");
 
     // Without qop, responses should be identical (no random cnonce)
     assert_eq!(
@@ -531,8 +526,10 @@ fn test_response_varies_with_qop() {
         stale: false,
     };
 
-    let response1 = DigestResponse::compute(&challenge, "user", "pass", "INVITE", "sip:test@example.com");
-    let response2 = DigestResponse::compute(&challenge, "user", "pass", "INVITE", "sip:test@example.com");
+    let response1 =
+        DigestResponse::compute(&challenge, "user", "pass", "INVITE", "sip:test@example.com");
+    let response2 =
+        DigestResponse::compute(&challenge, "user", "pass", "INVITE", "sip:test@example.com");
 
     // With qop, cnonces should differ (random)
     assert_ne!(

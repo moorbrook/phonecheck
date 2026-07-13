@@ -30,7 +30,10 @@ pub struct AudioEmbedder {
 
 impl Drop for AudioEmbedder {
     fn drop(&mut self) {
-        tracing::debug!("Releasing Wav2Vec2 ONNX model resources: {}", self.model_path);
+        tracing::debug!(
+            "Releasing Wav2Vec2 ONNX model resources: {}",
+            self.model_path
+        );
         // Session is dropped automatically by ort crate
     }
 }
@@ -113,7 +116,8 @@ impl AudioEmbedder {
                 anyhow::bail!(
                     "Embedding contains NaN/Inf at index {}: {}. \
                      Check Wav2Vec2 model output - may be corrupted or invalid input.",
-                    i, val
+                    i,
+                    val
                 );
             }
         }
@@ -309,7 +313,10 @@ mod tests {
         // Convert to common format for snapshot
         let formatted: Vec<String> = vec![
             format!("normalized_identical: {:.6}", sim_after_normalize),
-            format!("normalized_slightly_different: {:.6}", sim_slightly_different),
+            format!(
+                "normalized_slightly_different: {:.6}",
+                sim_slightly_different
+            ),
             format!(
                 "passes_threshold_identical: {}",
                 sim_after_normalize >= DEFAULT_SIMILARITY_THRESHOLD
@@ -344,7 +351,11 @@ mod tests {
             .collect();
 
         // Check dimension
-        assert_eq!(floats.len(), 768, "Reference embedding should have 768 dimensions");
+        assert_eq!(
+            floats.len(),
+            768,
+            "Reference embedding should have 768 dimensions"
+        );
 
         // Check normalization (L2 norm should be close to 1.0)
         let norm: f32 = floats.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -418,11 +429,20 @@ mod tests {
 
         let results = vec![
             format!("self_similarity: {:.6}", self_sim),
-            format!("self_passes_threshold: {}", self_sim >= DEFAULT_SIMILARITY_THRESHOLD),
+            format!(
+                "self_passes_threshold: {}",
+                self_sim >= DEFAULT_SIMILARITY_THRESHOLD
+            ),
             format!("slightly_perturbed_similarity: {:.6}", perturbed_sim),
-            format!("slightly_perturbed_passes: {}", perturbed_sim >= DEFAULT_SIMILARITY_THRESHOLD),
+            format!(
+                "slightly_perturbed_passes: {}",
+                perturbed_sim >= DEFAULT_SIMILARITY_THRESHOLD
+            ),
             format!("different_embedding_similarity: {:.6}", different_sim),
-            format!("different_passes: {}", different_sim >= DEFAULT_SIMILARITY_THRESHOLD),
+            format!(
+                "different_passes: {}",
+                different_sim >= DEFAULT_SIMILARITY_THRESHOLD
+            ),
         ];
 
         insta::assert_debug_snapshot!(results);
@@ -517,7 +537,9 @@ mod tests {
         let mut embedder = AudioEmbedder::new(model_path).expect("Failed to load embedder");
 
         // Full audio embedding
-        let full_embedding = embedder.embed(&samples).expect("Failed to embed full audio");
+        let full_embedding = embedder
+            .embed(&samples)
+            .expect("Failed to embed full audio");
         let full_sim = AudioEmbedder::cosine_similarity(&reference, &full_embedding);
 
         // First 1 second (simulating short capture)

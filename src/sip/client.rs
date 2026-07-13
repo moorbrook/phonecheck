@@ -1,6 +1,5 @@
 /// SIP Client - Makes outbound calls and manages call state
 /// Implements basic SIP UAC (User Agent Client) functionality
-
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -49,11 +48,20 @@ impl CallResult {
     }
 
     pub fn failed(error: String) -> Self {
-        Self { connected: false, error: Some(error), ..Default::default() }
+        Self {
+            connected: false,
+            error: Some(error),
+            ..Default::default()
+        }
     }
 
     pub fn failed_with_status(status: u16, error: String) -> Self {
-        Self { connected: false, sip_status: Some(status), error: Some(error), ..Default::default() }
+        Self {
+            connected: false,
+            sip_status: Some(status),
+            error: Some(error),
+            ..Default::default()
+        }
     }
 }
 
@@ -135,9 +143,13 @@ impl SipClient {
         // This is essential when public IP changes (DHCP, location change).
         // Non-fatal: if registration fails, we still attempt the call.
         if let Err(e) = self.register_with_transport(&transport).await {
-            warn!("SIP registration failed: {} - proceeding with call attempt", e);
+            warn!(
+                "SIP registration failed: {} - proceeding with call attempt",
+                e
+            );
         }
-        self.make_test_call_with_receiver(listen_duration, rtp_receiver, cancel_token, transport).await
+        self.make_test_call_with_receiver(listen_duration, rtp_receiver, cancel_token, transport)
+            .await
     }
 
     pub async fn make_test_call_with_receiver(
@@ -185,17 +197,43 @@ impl SipClient {
             }
         };
 
-        let invite = build_invite(&self.target_uri, &self.from_uri, &self.display_name, &call_id, &from_tag, cseq, local_addr, rtp_port, external_rtp_addr);
+        let invite = build_invite(
+            &self.target_uri,
+            &self.from_uri,
+            &self.display_name,
+            &call_id,
+            &from_tag,
+            cseq,
+            local_addr,
+            rtp_port,
+            external_rtp_addr,
+        );
 
         let mut response = match transport.send_invite_await_final(&invite).await {
             Ok(r) => r,
-            Err(e) => return Ok(CallResult::failed(format!("No response from server: {}", e))),
+            Err(e) => {
+                return Ok(CallResult::failed(format!(
+                    "No response from server: {}",
+                    e
+                )))
+            }
         };
 
         let mut status_code = parse_status_code(&response).unwrap_or(0);
 
         if status_code == 401 || status_code == 407 {
-            let res = self.handle_auth(&transport, &response, &call_id, &from_tag, &mut cseq, local_addr, rtp_port, external_rtp_addr).await?;
+            let res = self
+                .handle_auth(
+                    &transport,
+                    &response,
+                    &call_id,
+                    &from_tag,
+                    &mut cseq,
+                    local_addr,
+                    rtp_port,
+                    external_rtp_addr,
+                )
+                .await?;
             match res {
                 Ok(r) => {
                     response = r;
@@ -207,12 +245,27 @@ impl SipClient {
 
         if status_code != 200 {
             let category = SipErrorCategory::from_status(status_code);
-            return Ok(CallResult::failed_with_status(status_code, format!("{}: {}", status_code, category.description())));
+            return Ok(CallResult::failed_with_status(
+                status_code,
+                format!("{}: {}", status_code, category.description()),
+            ));
         }
 
         let to_tag = extract_to_tag(&response);
-        let via_branch = extract_via_branch(&response).unwrap_or_else(|| "z9hG4bKunknown".to_string());
-        let ack = build_ack(&self.target_uri, &self.from_uri, &self.display_name, &self.target_uri, to_tag.as_deref(), &call_id, &from_tag, cseq, local_addr, &via_branch);
+        let via_branch =
+            extract_via_branch(&response).unwrap_or_else(|| "z9hG4bKunknown".to_string());
+        let ack = build_ack(
+            &self.target_uri,
+            &self.from_uri,
+            &self.display_name,
+            &self.target_uri,
+            to_tag.as_deref(),
+            &call_id,
+            &from_tag,
+            cseq,
+            local_addr,
+            &via_branch,
+        );
         transport.send(&ack).await?;
 
         let remote_rtp_addr = extract_rtp_address(&response);
@@ -223,17 +276,39 @@ impl SipClient {
             warn!("No media address found in SDP!");
         }
 
-        info!("Call connected, listening for audio (local RTP port {})...", rtp_port);
+        info!(
+            "Call connected, listening for audio (local RTP port {})...",
+            rtp_port
+        );
         let completed_normally = if let Some(addr) = remote_rtp_addr {
-            rtp_receiver.receive_for_with_keepalive(listen_duration, cancel_token.clone(), addr).await?
+            rtp_receiver
+                .receive_for_with_keepalive(listen_duration, cancel_token.clone(), addr)
+                .await?
         } else {
-            rtp_receiver.receive_for_cancellable(listen_duration, cancel_token.clone()).await?
+            rtp_receiver
+                .receive_for_cancellable(listen_duration, cancel_token.clone())
+                .await?
         };
         let audio_samples = rtp_receiver.get_samples_f32();
-        let audio_received = crate::rtp::samples_to_duration_ms(audio_samples.len()) >= self.config.min_audio_duration_ms;
-        info!("Audio capture complete: {} samples ({} ms), audio_received={}", audio_samples.len(), crate::rtp::samples_to_duration_ms(audio_samples.len()), audio_received);
+        let audio_received = crate::rtp::samples_to_duration_ms(audio_samples.len())
+            >= self.config.min_audio_duration_ms;
+        info!(
+            "Audio capture complete: {} samples ({} ms), audio_received={}",
+            audio_samples.len(),
+            crate::rtp::samples_to_duration_ms(audio_samples.len()),
+            audio_received
+        );
 
-        self.terminate_call(&transport, &call_id, &from_tag, to_tag.as_deref(), cseq + 1, local_addr, completed_normally).await;
+        self.terminate_call(
+            &transport,
+            &call_id,
+            &from_tag,
+            to_tag.as_deref(),
+            cseq + 1,
+            local_addr,
+            completed_normally,
+        )
+        .await;
 
         if completed_normally {
             Ok(CallResult::success(audio_samples, audio_received))
@@ -253,35 +328,80 @@ impl SipClient {
         cseq: &mut u32,
         local_addr: SocketAddr,
         rtp_port: u16,
-        external_rtp_addr: Option<SocketAddr>
+        external_rtp_addr: Option<SocketAddr>,
     ) -> Result<std::result::Result<String, CallResult>> {
         let status_code = parse_status_code(response).unwrap_or(0);
         if self.config.sip_password.is_empty() {
-            return Ok(Err(CallResult::failed_with_status(status_code, "No SIP_PASSWORD".to_string())));
+            return Ok(Err(CallResult::failed_with_status(
+                status_code,
+                "No SIP_PASSWORD".to_string(),
+            )));
         }
 
         let auth_header = match extract_authenticate_header(response) {
             Some(h) => h,
-            None => return Ok(Err(CallResult::failed_with_status(status_code, "No WWW-Authenticate".to_string()))),
+            None => {
+                return Ok(Err(CallResult::failed_with_status(
+                    status_code,
+                    "No WWW-Authenticate".to_string(),
+                )))
+            }
         };
 
         let challenge = match DigestChallenge::parse(&auth_header) {
             Some(c) => c,
-            None => return Ok(Err(CallResult::failed_with_status(status_code, "Bad challenge".to_string()))),
+            None => {
+                return Ok(Err(CallResult::failed_with_status(
+                    status_code,
+                    "Bad challenge".to_string(),
+                )))
+            }
         };
 
-        let via_branch = extract_via_branch(response).unwrap_or_else(|| "z9hG4bKunknown".to_string());
+        let via_branch =
+            extract_via_branch(response).unwrap_or_else(|| "z9hG4bKunknown".to_string());
         let to_tag = extract_to_tag(response);
-        let ack = build_ack(&self.target_uri, &self.from_uri, &self.display_name, &self.target_uri, to_tag.as_deref(), call_id, from_tag, *cseq, local_addr, &via_branch);
+        let ack = build_ack(
+            &self.target_uri,
+            &self.from_uri,
+            &self.display_name,
+            &self.target_uri,
+            to_tag.as_deref(),
+            call_id,
+            from_tag,
+            *cseq,
+            local_addr,
+            &via_branch,
+        );
         transport.send(&ack).await?;
 
-        let digest = DigestResponse::compute(&challenge, &self.config.sip_username, &self.config.sip_password, "INVITE", &self.target_uri);
+        let digest = DigestResponse::compute(
+            &challenge,
+            &self.config.sip_username,
+            &self.config.sip_password,
+            "INVITE",
+            &self.target_uri,
+        );
         *cseq += 1;
-        let auth_invite = build_invite_with_auth(&self.target_uri, &self.from_uri, &self.display_name, call_id, from_tag, *cseq, local_addr, rtp_port, external_rtp_addr, &digest.to_header());
+        let auth_invite = build_invite_with_auth(
+            &self.target_uri,
+            &self.from_uri,
+            &self.display_name,
+            call_id,
+            from_tag,
+            *cseq,
+            local_addr,
+            rtp_port,
+            external_rtp_addr,
+            &digest.to_header(),
+        );
 
         match transport.send_invite_await_final(&auth_invite).await {
             Ok(r) => Ok(Ok(r)),
-            Err(e) => Ok(Err(CallResult::failed(format!("No response after auth: {}", e)))),
+            Err(e) => Ok(Err(CallResult::failed(format!(
+                "No response after auth: {}",
+                e
+            )))),
         }
     }
 
@@ -293,11 +413,25 @@ impl SipClient {
         to_tag: Option<&str>,
         cseq: u32,
         local_addr: SocketAddr,
-        completed_normally: bool
+        completed_normally: bool,
     ) {
-        let bye = build_bye(&self.target_uri, &self.from_uri, &self.display_name, &self.target_uri, to_tag, call_id, from_tag, cseq, local_addr);
+        let bye = build_bye(
+            &self.target_uri,
+            &self.from_uri,
+            &self.display_name,
+            &self.target_uri,
+            to_tag,
+            call_id,
+            from_tag,
+            cseq,
+            local_addr,
+        );
         let _ = transport.send(&bye).await;
-        let timeout = if completed_normally { Duration::from_secs(5) } else { Duration::from_secs(2) };
+        let timeout = if completed_normally {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(2)
+        };
         let _ = transport.receive(timeout).await;
     }
 
@@ -323,7 +457,9 @@ impl SipClient {
             local_addr,
         );
 
-        let response = transport.send_invite_await_final(&register).await
+        let response = transport
+            .send_invite_await_final(&register)
+            .await
             .context("REGISTER request timed out")?;
         let status = parse_status_code(&response).unwrap_or(0);
 
@@ -343,8 +479,8 @@ impl SipClient {
 
         let auth_header = extract_authenticate_header(&response)
             .context("No WWW-Authenticate header in 401/407 response")?;
-        let challenge = DigestChallenge::parse(&auth_header)
-            .context("Failed to parse digest challenge")?;
+        let challenge =
+            DigestChallenge::parse(&auth_header).context("Failed to parse digest challenge")?;
 
         let digest = DigestResponse::compute(
             &challenge,
@@ -365,7 +501,9 @@ impl SipClient {
             &digest.to_header(),
         );
 
-        let response = transport.send_invite_await_final(&auth_register).await
+        let response = transport
+            .send_invite_await_final(&auth_register)
+            .await
             .context("Authenticated REGISTER timed out")?;
         let status = parse_status_code(&response).unwrap_or(0);
 
@@ -384,8 +522,14 @@ mod tests {
 
     #[test]
     fn test_sip_error_category() {
-        assert_eq!(SipErrorCategory::from_status(401), SipErrorCategory::AuthRequired);
-        assert_eq!(SipErrorCategory::from_status(404), SipErrorCategory::NotFound);
+        assert_eq!(
+            SipErrorCategory::from_status(401),
+            SipErrorCategory::AuthRequired
+        );
+        assert_eq!(
+            SipErrorCategory::from_status(404),
+            SipErrorCategory::NotFound
+        );
         assert_eq!(SipErrorCategory::from_status(486), SipErrorCategory::Busy);
     }
 }

@@ -2,7 +2,6 @@
 /// Implements HTTP Digest authentication as used in SIP 401/407 challenges
 ///
 /// Uses the md5 crate for hash computation - no custom crypto implementation.
-
 use digest::Digest;
 use md5::Md5;
 use std::collections::HashMap;
@@ -20,14 +19,12 @@ pub struct DigestChallenge {
 }
 
 /// Supported digest algorithms
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum DigestAlgorithm {
     #[default]
     Md5,
     Md5Sess,
 }
-
 
 impl DigestChallenge {
     /// Parse a digest challenge from an authenticate header value
@@ -52,7 +49,10 @@ impl DigestChallenge {
 
         let qop = params.get("qop").cloned();
         let opaque = params.get("opaque").cloned();
-        let stale = params.get("stale").map(|s| s.eq_ignore_ascii_case("true")).unwrap_or(false);
+        let stale = params
+            .get("stale")
+            .map(|s| s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         Some(DigestChallenge {
             realm,
@@ -299,7 +299,11 @@ pub fn extract_authenticate_header(response: &str) -> Option<String> {
 /// Add hex encoding since we're using the digest crate
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
+        bytes
+            .as_ref()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect()
     }
 }
 
@@ -613,7 +617,7 @@ mod kani_proofs {
             for c in hash.chars() {
                 kani::assert(
                     c.is_ascii_hexdigit() && c.is_ascii_lowercase(),
-                    "MD5 hash must be lowercase hex"
+                    "MD5 hash must be lowercase hex",
                 );
             }
         }
@@ -626,7 +630,7 @@ mod kani_proofs {
         let encoded = hex::encode(&bytes);
         kani::assert(
             encoded.len() == bytes.len() * 2,
-            "hex encode must produce 2 chars per byte"
+            "hex encode must produce 2 chars per byte",
         );
     }
 
@@ -636,7 +640,7 @@ mod kani_proofs {
         let algo = DigestAlgorithm::default();
         kani::assert(
             algo == DigestAlgorithm::Md5,
-            "default algorithm must be MD5"
+            "default algorithm must be MD5",
         );
     }
 }
